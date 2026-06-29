@@ -13,6 +13,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
 
+from .email_otp import send_otp_email
 from .models import PasswordResetSession, SignupSession
 from .serializers import (
     CompleteSignupSerializer,
@@ -57,7 +58,7 @@ class AuthViewSet(viewsets.ViewSet):
 
         session = serializer.save()
 
-        print(f"AXIRA OTP for {session.phone}: {session.raw_otp}")
+        send_otp_email(session.email, session.raw_otp)
 
         return Response(
             {
@@ -141,7 +142,7 @@ class AuthViewSet(viewsets.ViewSet):
 
         session.raw_otp = otp
 
-        print(f"AXIRA new OTP for {session.phone}: {session.raw_otp}")
+        send_otp_email(session.email, otp)
 
         return Response(
             {
@@ -271,7 +272,13 @@ class AuthViewSet(viewsets.ViewSet):
             otp_expires_at=timezone.now() + timedelta(minutes=5),
         )
 
-        print(f"AXIRA Password Reset OTP for {identifier}: {otp}")
+        # Send OTP to email — resolve address from phone if needed
+        if "@" in identifier:
+            send_otp_email(identifier, otp)
+        else:
+            target = User.objects.filter(phone=identifier).first()
+            if target:
+                send_otp_email(target.email, otp)
 
         return Response(
             {

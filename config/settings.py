@@ -20,6 +20,7 @@ ALLOWED_HOSTS = os.environ.get(
 
 # ── Apps ──────────────────────────────────────────────────────────────────────
 INSTALLED_APPS = [
+    "cloudinary_storage",
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
@@ -43,6 +44,22 @@ RELOADLY_CLIENT_ID = os.environ.get("RELOADLY_CLIENT_ID", "")
 RELOADLY_CLIENT_SECRET = os.environ.get("RELOADLY_CLIENT_SECRET", "")
 RELOADLY_SANDBOX = os.environ.get("RELOADLY_SANDBOX", "true").lower() == "true"
 RELOADLY_NGN_PER_USD = float(os.environ.get("RELOADLY_NGN_PER_USD", "1700"))
+
+# Email — SendGrid SMTP (OTP verification)
+# Locally (no SENDGRID_API_KEY): prints to console via ConsoleEmailBackend.
+# In production: set SENDGRID_API_KEY and DEFAULT_FROM_EMAIL in Railway env vars.
+SENDGRID_API_KEY = os.environ.get("SENDGRID_API_KEY", "")
+DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL", "noreply@axira.com")
+
+if SENDGRID_API_KEY:
+    EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+    EMAIL_HOST = "smtp.sendgrid.net"
+    EMAIL_PORT = 587
+    EMAIL_USE_TLS = True
+    EMAIL_HOST_USER = "apikey"
+    EMAIL_HOST_PASSWORD = SENDGRID_API_KEY
+else:
+    EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
 
 # ── Middleware ─────────────────────────────────────────────────────────────────
 MIDDLEWARE = [
@@ -107,6 +124,16 @@ STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
+
+# Cloudinary — all ImageField / FileField uploads go here when configured.
+# Locally (no CLOUDINARY_CLOUD_NAME in .env) falls back to local media storage.
+if os.environ.get("CLOUDINARY_CLOUD_NAME"):
+    CLOUDINARY_STORAGE = {
+        "CLOUD_NAME": os.environ.get("CLOUDINARY_CLOUD_NAME", ""),
+        "API_KEY": os.environ.get("CLOUDINARY_API_KEY", ""),
+        "API_SECRET": os.environ.get("CLOUDINARY_API_SECRET", ""),
+    }
+    DEFAULT_FILE_STORAGE = "cloudinary_storage.storage.MediaCloudinaryStorage"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 

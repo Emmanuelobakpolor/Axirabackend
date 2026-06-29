@@ -248,9 +248,13 @@ class UserSerializer(serializers.ModelSerializer):
         if not obj.profile_photo:
             return None
 
+        url = obj.profile_photo.url
+        # Cloudinary returns a full https:// URL; local storage returns a path.
+        if url.startswith("http"):
+            return url
+
         request = self.context.get("request")
-
         if request is not None:
-            return request.build_absolute_uri(obj.profile_photo.url)
+            return request.build_absolute_uri(url)
 
-        return obj.profile_photo.url
+        return url
