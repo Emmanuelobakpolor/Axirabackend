@@ -1,3 +1,4 @@
+import os
 from datetime import timedelta
 
 from django.contrib.auth import get_user_model
@@ -10,6 +11,7 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from .email_otp import generate_otp, send_otp_email
@@ -377,4 +379,69 @@ class AuthViewSet(viewsets.ViewSet):
                 "message": "Profile photo updated successfully.",
                 "user": UserSerializer(request.user, context={"request": request}).data,
             }
+        )
+
+
+class CreateAdminView(APIView):
+    """
+    One-time endpoint to create an admin (staff) user.
+    Requires the SETUP_KEY env var to match the X-Setup-Key header.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        setup_key = os.environ.get("SETUP_KEY", "")
+        if not setup_key:
+            return Response(
+                {"error": "SETUP_KEY is not configured on the server."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        provided_key = request.headers.get("X-Setup-Key", "")
+        if provided_key != setup_key:
+            return Response(
+                {"error": "Invalid setup key."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        email = (request.data.get("email") or "").strip().lower()
+        phone = (request.data.get("phone") or "").strip()
+        full_name = (request.data.get("full_name") or "").strip()
+        password = request.data.get("password") or ""
+
+        if not all([email, phone, full_name, password]):
+            return Response(
+                {"error": "email, phone, full_name, and password are all required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if User.objects.filter(email=email).exists():
+            return Response(
+                {"error": f"A user with email {email} already exists."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        try:
+            user = User.objects.create_superuser(
+                email=email,
+                phone=phone,
+                full_name=full_name,
+                password=password,
+            )
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        tokens = tokens_for_user(user)
+        return Response(
+            {
+                "message": "Admin user created successfully.",
+                "user": {
+                    "id": str(user.id),
+                    "email": user.email,
+                    "full_name": user.full_name,
+                    "is_staff": user.is_staff,
+                },
+                **tokens,
+            },
+            status=status.HTTP_201_CREATED,
         )
