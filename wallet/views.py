@@ -42,7 +42,7 @@ class WalletViewSet(GenericViewSet):
 
     # ── Initiate deposit (Flutterwave) ────────────────────────────────────────
 
-    @action(detail=False, methods=['post'])
+    @action(detail=False, methods=['post'], url_path='initiate-deposit')
     def initiate_deposit(self, request):
         serializer = InitiateDepositSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -70,7 +70,7 @@ class WalletViewSet(GenericViewSet):
 
     # ── Verify payment after Flutterwave SDK completes ─────────────────────────
 
-    @action(detail=False, methods=['post'])
+    @action(detail=False, methods=['post'], url_path='verify-payment')
     def verify_payment(self, request):
         tx_ref = request.data.get('tx_ref', '').strip()
         if not tx_ref:
@@ -131,6 +131,7 @@ class WalletViewSet(GenericViewSet):
     @action(
         detail=False,
         methods=['post'],
+        url_path='flw-webhook',
         permission_classes=[AllowAny],
         authentication_classes=[],
     )
@@ -239,7 +240,7 @@ class WalletViewSet(GenericViewSet):
 
     # ── Resolve account (verifies account name before withdrawal) ──────────────
 
-    @action(detail=False, methods=['get'])
+    @action(detail=False, methods=['get'], url_path='resolve-account')
     def resolve_account(self, request):
         account_number = request.query_params.get('account_number', '').strip()
         bank_code = request.query_params.get('bank_code', '').strip()
