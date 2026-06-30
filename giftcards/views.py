@@ -36,18 +36,6 @@ class GiftCardViewSet(GenericViewSet):
             return Response({'error': str(e)}, status=status.HTTP_502_BAD_GATEWAY)
         return Response({'brands': result})
 
-    @action(detail=False, methods=['get'], url_path='debug-products')
-    def debug_products(self, request):
-        brand = request.query_params.get('brand', '').strip()
-        country_code = request.query_params.get('country_code', 'US').strip().upper()
-        if not brand:
-            return Response({'error': 'brand is required.'})
-        try:
-            raw = get_products(brand, country_code)
-        except ReloadlyError as e:
-            return Response({'error': str(e)})
-        return Response({'count': len(raw), 'raw': raw[:3]})
-
     @action(detail=False, methods=['get'])
     def products(self, request):
         brand = request.query_params.get('brand', '').strip()
@@ -63,6 +51,15 @@ class GiftCardViewSet(GenericViewSet):
         rate = Decimal(str(settings.RELOADLY_NGN_PER_USD))
         products = []
         for p in raw:
+            redeem_obj = p.get('redeemInstruction') or {}
+            extra = {
+                'category': (p.get('category') or {}).get('name', ''),
+                'redeem_instruction': redeem_obj.get('concise', ''),
+                'discount_percentage': float(p.get('discountPercentage') or 0),
+                'sender_fee': float(p.get('senderFee') or 0),
+                'sender_fee_percentage': float(p.get('senderFeePercentage') or 0),
+            }
+
             fixed = p.get('fixedRecipientDenominations') or []
             if fixed:
                 for price in fixed:
@@ -73,6 +70,7 @@ class GiftCardViewSet(GenericViewSet):
                         'unit_price_usd': str(usd),
                         'unit_price_ngn': str((usd * rate).quantize(Decimal('0.01'))),
                         'open_range': False,
+                        **extra,
                     })
             else:
                 min_usd = Decimal(str(p.get('minRecipientDenomination') or 1))
@@ -85,6 +83,7 @@ class GiftCardViewSet(GenericViewSet):
                     'open_range': True,
                     'min_usd': str(min_usd),
                     'max_usd': str(max_usd),
+                    **extra,
                 })
 
         return Response({'products': products})
