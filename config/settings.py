@@ -33,6 +33,7 @@ INSTALLED_APPS = [
     "accounts",
     "wallet",
     "giftcards",
+    "admin_api",
 ]
 
 # ── Third-party API keys (never hardcoded) ────────────────────────────────────

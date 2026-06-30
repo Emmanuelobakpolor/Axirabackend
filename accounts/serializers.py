@@ -241,6 +241,7 @@ class UserSerializer(serializers.ModelSerializer):
             "phone",
             "profile_photo",
             "full_name",
+            "is_staff",
             "created_at",
         ]
 
