@@ -36,6 +36,18 @@ class GiftCardViewSet(GenericViewSet):
             return Response({'error': str(e)}, status=status.HTTP_502_BAD_GATEWAY)
         return Response({'brands': result})
 
+    @action(detail=False, methods=['get'], url_path='debug-products')
+    def debug_products(self, request):
+        brand = request.query_params.get('brand', '').strip()
+        country_code = request.query_params.get('country_code', 'US').strip().upper()
+        if not brand:
+            return Response({'error': 'brand is required.'})
+        try:
+            raw = get_products(brand, country_code)
+        except ReloadlyError as e:
+            return Response({'error': str(e)})
+        return Response({'count': len(raw), 'raw': raw[:3]})
+
     @action(detail=False, methods=['get'])
     def products(self, request):
         brand = request.query_params.get('brand', '').strip()
