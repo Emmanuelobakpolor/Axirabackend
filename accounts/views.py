@@ -5,7 +5,6 @@ from django.contrib.auth.hashers import check_password, make_password
 from django.db import IntegrityError
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
-from django.utils.crypto import get_random_string
 from rest_framework import serializers, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import AuthenticationFailed
@@ -13,7 +12,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .email_otp import send_otp_email
+from .email_otp import generate_otp, send_otp_email
 from .models import PasswordResetSession, SignupSession
 from .serializers import (
     CompleteSignupSerializer,
@@ -133,7 +132,7 @@ class AuthViewSet(viewsets.ViewSet):
                 {"detail": "This signup session has already been completed."}
             )
 
-        otp = get_random_string(4, allowed_chars="0123456789")
+        otp = generate_otp()
 
         session.otp_hash = make_password(otp)
         session.otp_expires_at = timezone.now() + timedelta(minutes=5)
@@ -264,7 +263,7 @@ class AuthViewSet(viewsets.ViewSet):
         serializer.is_valid(raise_exception=True)
 
         identifier = serializer.validated_data["identifier"]
-        otp = get_random_string(4, allowed_chars="0123456789")
+        otp = generate_otp()
 
         session = PasswordResetSession.objects.create(
             identifier=identifier,

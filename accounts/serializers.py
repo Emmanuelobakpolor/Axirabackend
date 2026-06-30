@@ -4,9 +4,9 @@ from datetime import timedelta
 from django.contrib.auth.hashers import make_password
 from django.contrib.auth.password_validation import validate_password
 from django.utils import timezone
-from django.utils.crypto import get_random_string
 from rest_framework import serializers
 
+from .email_otp import generate_otp
 from .models import SignupSession, User
 
 PHONE_RE = re.compile(r"^\+[1-9]\d{7,14}$")
@@ -56,7 +56,7 @@ class StartSignupSerializer(serializers.Serializer):
         return attrs
 
     def create(self, validated_data):
-        otp = get_random_string(4, allowed_chars="0123456789")
+        otp = generate_otp()
 
         session = SignupSession.objects.create(
             email=validated_data["email"],

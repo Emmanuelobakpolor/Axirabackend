@@ -2,8 +2,20 @@ import logging
 
 from django.conf import settings
 from django.core.mail import send_mail
+from django.utils.crypto import get_random_string
 
 logger = logging.getLogger(__name__)
+
+# When SENDGRID_API_KEY is not configured, every OTP is this fixed value
+# so the app works during development/testing without an email provider.
+_DEV_OTP = "1234"
+
+
+def generate_otp() -> str:
+    """Returns a real random 4-digit OTP in production, or _DEV_OTP in dev."""
+    if not settings.SENDGRID_API_KEY:
+        return _DEV_OTP
+    return get_random_string(4, allowed_chars="0123456789")
 
 
 def send_otp_email(email: str, otp: str) -> bool:
