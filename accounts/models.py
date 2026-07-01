@@ -52,6 +52,9 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     transaction_pin_hash = models.CharField(max_length=128, blank=True)
 
+    # Quidax sub-account UID — set automatically after registration
+    quidax_user_id = models.CharField(max_length=100, blank=True, db_index=True)
+
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
 

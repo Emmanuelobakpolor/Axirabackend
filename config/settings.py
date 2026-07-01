@@ -33,6 +33,7 @@ INSTALLED_APPS = [
     "accounts",
     "wallet",
     "giftcards",
+    "crypto",
     "admin_api",
 ]
 
@@ -45,6 +46,27 @@ RELOADLY_CLIENT_ID = os.environ.get("RELOADLY_CLIENT_ID", "")
 RELOADLY_CLIENT_SECRET = os.environ.get("RELOADLY_CLIENT_SECRET", "")
 RELOADLY_SANDBOX = os.environ.get("RELOADLY_SANDBOX", "true").lower() == "true"
 RELOADLY_NGN_PER_USD = float(os.environ.get("RELOADLY_NGN_PER_USD", "1700"))
+
+# ── Quidax (crypto buy/sell/swap) ─────────────────────────────────────────────
+QUIDAX_SECRET_KEY = os.environ.get("QUIDAX_SECRET_KEY", "")
+QUIDAX_USER_ID = os.environ.get("QUIDAX_USER_ID", "me")  # 'me' = master account
+
+# NGN/USD rate for converting flat USD fees → NGN
+NGN_PER_USD = float(os.environ.get("NGN_PER_USD", "1600"))
+
+# Axira's bank account (displayed to users for buy orders)
+AXIRA_BANK_NAME = os.environ.get("AXIRA_BANK_NAME", "")
+AXIRA_ACCOUNT_NUMBER = os.environ.get("AXIRA_ACCOUNT_NUMBER", "")
+AXIRA_ACCOUNT_NAME = os.environ.get("AXIRA_ACCOUNT_NAME", "")
+
+# Axira's crypto deposit addresses (for sell orders — users send crypto here)
+AXIRA_BTC_ADDRESS = os.environ.get("AXIRA_BTC_ADDRESS", "")
+AXIRA_ETH_ADDRESS = os.environ.get("AXIRA_ETH_ADDRESS", "")
+AXIRA_USDT_ADDRESS = os.environ.get("AXIRA_USDT_ADDRESS", "")
+AXIRA_SOL_ADDRESS = os.environ.get("AXIRA_SOL_ADDRESS", "")
+AXIRA_BNB_ADDRESS = os.environ.get("AXIRA_BNB_ADDRESS", "")
+AXIRA_XRP_ADDRESS = os.environ.get("AXIRA_XRP_ADDRESS", "")
+AXIRA_USDC_ADDRESS = os.environ.get("AXIRA_USDC_ADDRESS", "")
 
 # Email — SendGrid SMTP (OTP verification)
 # Locally (no SENDGRID_API_KEY): prints to console via ConsoleEmailBackend.

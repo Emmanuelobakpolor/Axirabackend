@@ -47,7 +47,10 @@ class AuthViewSet(viewsets.ViewSet):
     permission_classes = [AllowAny]
 
     def get_permissions(self):
-        if self.action in {"me", "update_profile", "update_profile_photo"}:
+        if self.action in {
+            "me", "update_profile", "update_profile_photo",
+            "remove_profile_photo", "change_password", "update_email",
+        }:
             return [IsAuthenticated()]
 
         return [AllowAny()]
@@ -366,6 +369,70 @@ class AuthViewSet(viewsets.ViewSet):
 
         return Response({"message": "Password reset successfully."})
 
+    @action(detail=False, methods=["post"], url_path="change-password")
+    def change_password(self, request):
+        current = request.data.get("current_password", "")
+        new_pw = request.data.get("new_password", "")
+        confirm = request.data.get("confirm_password", "")
+
+        if not current or not new_pw or not confirm:
+            return Response(
+                {"error": "current_password, new_password, and confirm_password are required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not request.user.check_password(current):
+            return Response(
+                {"error": "Current password is incorrect."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if new_pw != confirm:
+            return Response(
+                {"error": "New passwords do not match."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if len(new_pw) < 8:
+            return Response(
+                {"error": "New password must be at least 8 characters."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        request.user.set_password(new_pw)
+        request.user.save(update_fields=["password", "updated_at"])
+        return Response({"message": "Password updated successfully."})
+
+    @action(detail=False, methods=["post"], url_path="update-email")
+    def update_email(self, request):
+        new_email = (request.data.get("new_email") or "").strip().lower()
+        password = request.data.get("password", "")
+
+        if not new_email or not password:
+            return Response(
+                {"error": "new_email and password are required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not request.user.check_password(password):
+            return Response(
+                {"error": "Password is incorrect."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if User.objects.filter(email__iexact=new_email).exclude(pk=request.user.pk).exists():
+            return Response(
+                {"error": "This email is already in use."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        request.user.email = new_email
+        request.user.save(update_fields=["email", "updated_at"])
+        return Response({
+            "message": "Email updated successfully.",
+            "user": UserSerializer(request.user, context={"request": request}).data,
+        })
+
     @action(detail=False, methods=["post"], url_path="update-profile-photo")
     def update_profile_photo(self, request):
         serializer = ProfilePhotoUploadSerializer(data=request.data)
@@ -377,6 +444,19 @@ class AuthViewSet(viewsets.ViewSet):
         return Response(
             {
                 "message": "Profile photo updated successfully.",
+                "user": UserSerializer(request.user, context={"request": request}).data,
+            }
+        )
+
+    @action(detail=False, methods=["post"], url_path="remove-profile-photo")
+    def remove_profile_photo(self, request):
+        if request.user.profile_photo:
+            request.user.profile_photo.delete(save=False)
+            request.user.profile_photo = None
+            request.user.save(update_fields=["profile_photo", "updated_at"])
+        return Response(
+            {
+                "message": "Profile photo removed.",
                 "user": UserSerializer(request.user, context={"request": request}).data,
             }
         )
