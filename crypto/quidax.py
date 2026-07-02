@@ -7,27 +7,43 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import logging
 
 from django.conf import settings
+
+logger = logging.getLogger(__name__)
 
 QUIDAX_BASE = 'https://openapi.quidax.io/exchange-open-api/api/v1'
 
 
 class QuidaxError(Exception):
+    """Custom exception for Quidax API errors."""
     def __init__(self, message, retryable=False):
         super().__init__(message)
         self.retryable = retryable
 
 
+def _get_secret_key():
+    """Ensure secret key is configured."""
+    key = getattr(settings, 'QUIDAX_SECRET_KEY', None)
+    if not key:
+        raise QuidaxError("QUIDAX_SECRET_KEY is not set in Django settings. "
+                         "Add it to your .env or settings.py")
+    return key
+
+
 def _headers():
     return {
-        'Authorization': f'Bearer {settings.QUIDAX_SECRET_KEY}',
+        'Authorization': f'Bearer {_get_secret_key()}',
         'Accept': 'application/json',
         'Content-Type': 'application/json',
     }
 
 
-def _call(method, path, payload=None, max_retries=3):
+def _call(method: str, path: str, payload: dict = None, max_retries: int = 3):
+    """
+    Internal method to make HTTP requests to Quidax API with retry logic.
+    """
     url = QUIDAX_BASE + path
     data = json.dumps(payload).encode() if payload is not None else None
     last_err = None
@@ -36,32 +52,41 @@ def _call(method, path, payload=None, max_retries=3):
         req = urllib.request.Request(url, data=data, headers=_headers(), method=method)
         try:
             with urllib.request.urlopen(req, timeout=15) as res:
-                body = json.loads(res.read())
+                body = json.loads(res.read().decode('utf-8'))
+
             if body.get('status') != 'success':
-                raise QuidaxError(body.get('message', 'Unknown Quidax error'), retryable=False)
+                error_msg = body.get('message', 'Unknown Quidax error')
+                logger.error(f"Quidax API error: {error_msg}")
+                raise QuidaxError(error_msg, retryable=False)
+
+            logger.info(f"Quidax {method} {path} succeeded")
             return body.get('data', {})
 
         except urllib.error.HTTPError as e:
             try:
-                body = json.loads(e.read())
+                body = json.loads(e.read().decode('utf-8'))
                 msg = body.get('message', f'HTTP {e.code}')
             except Exception:
                 msg = f'HTTP {e.code}: {e.reason}'
             retryable = e.code in (429, 500, 502, 503, 504)
             last_err = QuidaxError(msg, retryable=retryable)
+            logger.warning(f"Quidax HTTPError {e.code}: {msg}")
 
         except (urllib.error.URLError, TimeoutError, OSError) as e:
             last_err = QuidaxError(f'Network error: {e}', retryable=True)
+            logger.warning(f"Quidax network error on attempt {attempt+1}: {e}")
 
         if last_err and not last_err.retryable:
             raise last_err
+
         if attempt < max_retries - 1:
-            time.sleep(min(2 ** attempt, 8))
+            sleep_time = min(2 ** attempt, 8)
+            time.sleep(sleep_time)
 
-    raise last_err
+    raise last_err or QuidaxError("Max retries exceeded")
 
 
-# ── Market data ───────────────────────────────────────────────────────────────
+# ── Market Data ─────────────────────────────────────────────────────────────
 
 def get_all_tickers() -> dict:
     """Returns dict keyed by market symbol e.g. {'btcngn': {...}}"""
@@ -69,22 +94,26 @@ def get_all_tickers() -> dict:
 
 
 def get_ticker(market: str) -> dict:
-    """Returns {'at': ..., 'ticker': {'last': ..., ...}} for one market."""
+    """Returns ticker data for one market."""
     return _call('GET', f'/markets/{market}/tickers')
 
 
-# ── Sub-account management ────────────────────────────────────────────────────
+# ── Sub-account Management ──────────────────────────────────────────────────
 
-def create_sub_account(email: str, first_name: str, last_name: str) -> dict:
+def create_sub_account(email: str, first_name: str, last_name: str, phone_number: str = None) -> dict:
     """
-    Create a Quidax sub-account for a new Axira user.
-    Returns the sub-account data including 'id' (the Quidax UID to store).
+    Create a Quidax sub-account.
+    Returns the sub-account data (including 'id' to store in your User model).
     """
-    return _call('POST', '/users', {
+    payload = {
         'email': email,
         'first_name': first_name,
         'last_name': last_name,
-    })
+    }
+    if phone_number:
+        payload['phone_number'] = phone_number
+
+    return _call('POST', '/users', payload)
 
 
 def get_sub_account(uid: str) -> dict:
@@ -92,13 +121,12 @@ def get_sub_account(uid: str) -> dict:
     return _call('GET', f'/users/{uid}')
 
 
-# ── Deposit addresses ─────────────────────────────────────────────────────────
+# ── Deposit Addresses ───────────────────────────────────────────────────────
 
 def get_deposit_address(uid: str, currency: str, network: str = None) -> dict:
     """
-    Get (or generate) the deposit address for a currency on a user's sub-account.
-    network is optional — required for multi-network coins (e.g. USDT on TRC20).
-    Returns {'address': '...', 'currency': 'btc', 'network': '...'}
+    Get or generate deposit address for a currency.
+    network is optional (required for coins like USDT on multiple networks).
     """
     params = {'currency': currency.lower()}
     if network:
@@ -107,32 +135,27 @@ def get_deposit_address(uid: str, currency: str, network: str = None) -> dict:
     return _call('GET', f'/users/{uid}/deposit_address?{qs}')
 
 
-# ── Wallet balances ───────────────────────────────────────────────────────────
+# ── Wallet Balances ─────────────────────────────────────────────────────────
 
 def get_wallets(uid: str) -> list:
-    """
-    Get all wallet balances for a Quidax sub-account.
-    Returns list of wallet dicts: [{'currency': 'btc', 'balance': '0.001', ...}]
-    """
+    """Get all wallet balances for a sub-account."""
     return _call('GET', f'/users/{uid}/wallets')
 
 
 def get_wallet(uid: str, currency: str) -> dict:
-    """Get a single wallet balance for a currency."""
+    """Get single wallet balance."""
     return _call('GET', f'/users/{uid}/wallets/{currency.lower()}')
 
 
-# ── Trade execution ───────────────────────────────────────────────────────────
+# ── Trade Execution ─────────────────────────────────────────────────────────
 
 def create_instant_order(side: str, market: str, volume: str, uid: str = None) -> dict:
     """
     Create an instant buy/sell order.
-    uid: Quidax user ID. Defaults to QUIDAX_USER_ID (business account).
-    side: 'buy' | 'sell'
+    side: 'buy' or 'sell'
     market: e.g. 'btcngn'
-    volume: amount in base currency
     """
-    user_id = uid or settings.QUIDAX_USER_ID
+    user_id = uid or getattr(settings, 'QUIDAX_USER_ID', 'me')
     return _call('POST', f'/users/{user_id}/instant_orders', {
         'market': market,
         'side': side,
@@ -142,6 +165,6 @@ def create_instant_order(side: str, market: str, volume: str, uid: str = None) -
 
 
 def get_instant_order(order_id: str, uid: str = None) -> dict:
-    """Fetch the status of an instant order."""
-    user_id = uid or settings.QUIDAX_USER_ID
+    """Fetch status of an instant order."""
+    user_id = uid or getattr(settings, 'QUIDAX_USER_ID', 'me')
     return _call('GET', f'/users/{user_id}/instant_orders/{order_id}')
