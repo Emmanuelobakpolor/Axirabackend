@@ -366,8 +366,8 @@ def _order_dict(o: CryptoOrder) -> dict:
 # ── Views ─────────────────────────────────────────────────────────────────────
 
 class CryptoPricesView(APIView):
-    """Live prices + coin metadata. Flutter uses this for display only."""
-    permission_classes = [IsAuthenticated]
+    """Live prices + coin metadata. Public — no auth required."""
+    permission_classes = [AllowAny]
 
     def get(self, request):
         try:
@@ -393,8 +393,8 @@ class CryptoPricesView(APIView):
 
 
 class CryptoFeesView(APIView):
-    """Current fee config — Flutter uses for estimate display only."""
-    permission_classes = [IsAuthenticated]
+    """Current fee config — public, Flutter uses for estimate display only."""
+    permission_classes = [AllowAny]
 
     def get(self, request):
         fees = {}
