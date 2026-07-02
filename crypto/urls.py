@@ -1,3 +1,5 @@
+from django.conf import settings
+from django.http import JsonResponse
 from django.urls import path
 
 from .views import (
@@ -13,6 +15,16 @@ from .views import (
     CryptoWalletView,
     CryptoWebhookView,
 )
+
+
+def _debug_quidax(request):
+    key = getattr(settings, 'QUIDAX_SECRET_KEY', None) or ''
+    return JsonResponse({
+        'key_set': bool(key),
+        'key_prefix': key[:8] if key else '',
+        'key_length': len(key),
+        'has_bearer_prefix': key.startswith('Bearer '),
+    })
 
 urlpatterns = [
     # Public-ish data
@@ -35,4 +47,7 @@ urlpatterns = [
 
     # Webhook (no auth — HMAC verified internally)
     path('crypto/webhook/quidax/', CryptoWebhookView.as_view()),
+
+    # TEMPORARY DEBUG — remove after confirming QUIDAX_SECRET_KEY
+    path('crypto/debug-key/', _debug_quidax),
 ]
