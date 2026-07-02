@@ -1,6 +1,6 @@
 """
 Quidax Business API client (stdlib urllib — no extra dependencies).
-Base URL: https://www.quidax.com/api/v1
+Base URL: https://openapi.quidax.io/exchange-open-api/api/v1
 """
 import json
 import time
@@ -10,7 +10,7 @@ import urllib.request
 
 from django.conf import settings
 
-QUIDAX_BASE = 'https://www.quidax.com/api/v1'
+QUIDAX_BASE = 'https://openapi.quidax.io/exchange-open-api/api/v1'
 
 
 class QuidaxError(Exception):
