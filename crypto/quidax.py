@@ -37,6 +37,7 @@ def _headers():
         'Authorization': f'Bearer {_get_secret_key()}',
         'Accept': 'application/json',
         'Content-Type': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (compatible; Axira/1.0)',
     }
 
 
