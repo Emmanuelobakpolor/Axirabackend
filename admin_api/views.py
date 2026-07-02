@@ -101,10 +101,13 @@ class AdminOverviewView(APIView):
 
         total_deposits_ngn = completed_deposits.aggregate(t=Sum('amount'))['t'] or 0
         total_withdrawals_ngn = completed_withdrawals.aggregate(t=Sum('amount'))['t'] or 0
-        deposits_today_ngn = completed_deposits.filter(
-            created_at__date=today
-        ).aggregate(t=Sum('amount'))['t'] or 0
-        deposits_today_count = completed_deposits.filter(created_at__date=today).count()
+
+        deposits_today_qs = Transaction.objects.filter(
+            tx_type=Transaction.TxType.DEPOSIT,
+            created_at__date=today,
+        ).exclude(status=Transaction.Status.FAILED)
+        deposits_today_ngn = deposits_today_qs.aggregate(t=Sum('amount'))['t'] or 0
+        deposits_today_count = deposits_today_qs.count()
 
         # Combined recent transactions (wallet + giftcard)
         wallet_txns = list(
