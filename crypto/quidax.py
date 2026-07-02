@@ -1,6 +1,6 @@
 """
 Quidax Business API client (stdlib urllib — no extra dependencies).
-Base URL: https://openapi.quidax.io/exchange-open-api/api/v1
+Base URL: ``
 """
 import json
 import time

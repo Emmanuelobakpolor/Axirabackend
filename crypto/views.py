@@ -44,6 +44,12 @@ SUPPORTED_COINS = {
     'BNB':  'bnbngn',
     'XRP':  'xrpngn',
     'USDC': 'usdcngn',
+    'DOGE': 'dogengn',
+    'ADA':  'adangn',
+    'LINK': 'linkngn',
+    'DOT':  'dotngn',
+    'LTC':  'ltcngn',
+    'TRX':  'trxngn',
 }
 
 COIN_META = {
@@ -54,7 +60,18 @@ COIN_META = {
     'BNB':  {'name': 'Binance Coin', 'color': '#F3BA2F', 'letter': 'B'},
     'XRP':  {'name': 'Ripple',       'color': '#346AA9', 'letter': 'X'},
     'USDC': {'name': 'USDC Coin',    'color': '#2775CA', 'letter': 'U'},
+    'DOGE': {'name': 'Dogecoin',     'color': '#C2A633', 'letter': 'D'},
+    'ADA':  {'name': 'Cardano',      'color': '#0033AD', 'letter': 'A'},
+    'LINK': {'name': 'Chainlink',    'color': '#2A5ADA', 'letter': 'L'},
+    'DOT':  {'name': 'Polkadot',     'color': '#E6007A', 'letter': 'D'},
+    'LTC':  {'name': 'Litecoin',     'color': '#345D9D', 'letter': 'L'},
+    'TRX':  {'name': 'Tron',         'color': '#EF0027', 'letter': 'T'},
 }
+
+
+def _logo_url(coin: str) -> str:
+    return f'https://assets.coincap.io/assets/icons/{coin.lower()}@2x.png'
+
 
 QUOTE_TTL_SECONDS = 30
 
@@ -195,15 +212,32 @@ def _parse_decimal(value, field_name: str) -> Decimal:
 
 
 def _fetch_live_rate(coin: str) -> Decimal:
+    """
+    Fetch coin's live NGN rate. Some coins (e.g. BNB) have no direct NGN
+    market on Quidax — only a USDT market — so fall back to converting
+    coin/USDT * USDT/NGN when the direct market returns no price.
+    """
     market = SUPPORTED_COINS[coin]
     try:
         data = get_ticker(market)
         rate = Decimal(str(data.get('ticker', {}).get('last', '0')))
-        if rate <= 0:
-            raise ValueError(f'Zero price returned for {coin}')
-        return rate
+        if rate > 0:
+            return rate
+    except (QuidaxError, InvalidOperation):
+        pass
+
+    try:
+        usdt_data = get_ticker(f'{coin.lower()}usdt')
+        usdt_rate = Decimal(str(usdt_data.get('ticker', {}).get('last', '0')))
+        usdtngn_data = get_ticker('usdtngn')
+        usdtngn_rate = Decimal(str(usdtngn_data.get('ticker', {}).get('last', '0')))
+        rate = usdt_rate * usdtngn_rate
+        if rate > 0:
+            return rate
     except (QuidaxError, InvalidOperation) as exc:
         raise ValueError(f'Unable to fetch live price for {coin}.') from exc
+
+    raise ValueError(f'Unable to fetch live price for {coin}.')
 
 
 def _log(order: CryptoOrder, event: str, detail: dict = None) -> None:
@@ -365,6 +399,29 @@ def _order_dict(o: CryptoOrder) -> dict:
 
 # ── Views ─────────────────────────────────────────────────────────────────────
 
+def _ticker_last(tickers: dict, market: str) -> Decimal:
+    raw = tickers.get(market, {}).get('ticker', {}).get('last', '0')
+    try:
+        return Decimal(str(raw))
+    except InvalidOperation:
+        return Decimal('0')
+
+
+def _resolve_price_ngn(coin: str, tickers: dict) -> Decimal:
+    """
+    Resolve coin's NGN price from the bulk tickers payload, falling back to
+    coin/USDT * USDT/NGN for coins with no direct NGN market (e.g. BNB).
+    """
+    direct = _ticker_last(tickers, SUPPORTED_COINS[coin])
+    if direct > 0:
+        return direct
+
+    usdt_price = _ticker_last(tickers, f'{coin.lower()}usdt')
+    usdtngn_price = _ticker_last(tickers, 'usdtngn')
+    converted = usdt_price * usdtngn_price
+    return converted if converted > 0 else Decimal('0')
+
+
 class CryptoPricesView(APIView):
     """Live prices + coin metadata. Public — no auth required."""
     permission_classes = [AllowAny]
@@ -377,8 +434,8 @@ class CryptoPricesView(APIView):
             return Response({'error': str(exc)}, status=502)
 
         coins, prices = [], {}
-        for coin, market in SUPPORTED_COINS.items():
-            price = tickers.get(market, {}).get('ticker', {}).get('last', '0')
+        for coin in SUPPORTED_COINS:
+            price = str(_resolve_price_ngn(coin, tickers))
             prices[coin] = price
             meta = COIN_META.get(coin, {})
             coins.append({
@@ -386,6 +443,7 @@ class CryptoPricesView(APIView):
                 'name': meta.get('name', coin),
                 'color': meta.get('color', '#888888'),
                 'letter': meta.get('letter', coin[0]),
+                'logo_url': _logo_url(coin),
                 'price_ngn': price,
             })
 
