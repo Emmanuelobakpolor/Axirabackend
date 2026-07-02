@@ -56,7 +56,7 @@ COIN_META = {
     'USDC': {'name': 'USDC Coin',    'color': '#2775CA', 'letter': 'U'},
 }
 
-QUOTE_TTL_SECONDS = 60
+QUOTE_TTL_SECONDS = 30
 
 _NGN_PER_USD = Decimal(str(getattr(settings, 'NGN_PER_USD', '1600')))
 
@@ -304,7 +304,7 @@ class CryptoFeesView(APIView):
 
 class CryptoQuoteView(APIView):
     """
-    Request a price-locked quote valid for 60 seconds.
+    Request a price-locked quote valid for 30 seconds.
 
     POST body:
         type    : 'buy' | 'sell' | 'swap'
@@ -313,7 +313,7 @@ class CryptoQuoteView(APIView):
         to_coin : 'ETH'  (swap only)
 
     The backend fetches the live Quidax price at this moment, computes the
-    fee, and locks the result into a CryptoQuote row with a 60-second expiry.
+    fee, and locks the result into a CryptoQuote row with a 30-second expiry.
     The client must submit quote_id when placing the order.
     """
     permission_classes = [IsAuthenticated]
