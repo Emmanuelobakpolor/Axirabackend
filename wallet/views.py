@@ -145,6 +145,13 @@ class WalletViewSet(GenericViewSet):
 
         if event == 'charge.completed' and data.get('status') == 'successful':
             tx_ref = data.get('tx_ref', '')
+
+            # Crypto buy orders have references starting with 'CRY' — route there
+            if tx_ref.startswith('CRY'):
+                from crypto.views import handle_flw_crypto_charge
+                handle_flw_crypto_charge(data)
+                return Response({'status': 'ok'})
+
             try:
                 tx = Transaction.objects.get(flw_tx_ref=tx_ref)
             except Transaction.DoesNotExist:

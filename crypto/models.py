@@ -86,7 +86,7 @@ class CryptoDepositAddress(models.Model):
 
 class CryptoQuote(models.Model):
     """
-    A price-locked quote valid for 60 seconds.
+    A price-locked quote valid for 30 seconds.
     Must be consumed (used_at set) before it expires.
     An expired or already-used quote is rejected at order creation.
     """
@@ -178,6 +178,8 @@ class CryptoOrder(models.Model):
     total_ngn = models.DecimalField(max_digits=14, decimal_places=2)
     payment_proof = models.ImageField(upload_to='crypto_proofs/', null=True, blank=True)
     quidax_order_id = models.CharField(max_length=100, blank=True)
+    flw_payment_url = models.URLField(max_length=500, blank=True)
+    flw_transaction_id = models.CharField(max_length=100, blank=True)
     reference = models.CharField(max_length=40, unique=True, blank=True)
     idempotency_key = models.CharField(max_length=100, unique=True, null=True, blank=True, db_index=True)
     note = models.TextField(blank=True)
