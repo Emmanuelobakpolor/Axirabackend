@@ -65,13 +65,19 @@ def _call(method: str, path: str, payload: dict = None, max_retries: int = 3):
 
         except urllib.error.HTTPError as e:
             try:
-                body = json.loads(e.read().decode('utf-8'))
-                msg = body.get('message', f'HTTP {e.code}')
+                raw = e.read().decode('utf-8')
+                body = json.loads(raw) if raw else {}
+                data = body.get('data') if isinstance(body.get('data'), dict) else {}
+                msg = (
+                    body.get('message')
+                    or data.get('message')
+                    or (f'HTTP {e.code}' if e.code != 404 else f'Endpoint not found: {path}')
+                )
             except Exception:
-                msg = f'HTTP {e.code}: {e.reason}'
+                msg = f'HTTP {e.code}: {e.reason or "Unknown error"}'
             retryable = e.code in (429, 500, 502, 503, 504)
             last_err = QuidaxError(msg, retryable=retryable)
-            logger.warning(f"Quidax HTTPError {e.code}: {msg}")
+            logger.warning(f"Quidax HTTPError {e.code} {method} {path}: {msg}")
 
         except (urllib.error.URLError, TimeoutError, OSError) as e:
             last_err = QuidaxError(f'Network error: {e}', retryable=True)
@@ -152,20 +158,20 @@ def get_wallet(uid: str, currency: str) -> dict:
 
 def create_instant_order(side: str, market: str, volume: str, uid: str = None) -> dict:
     """
-    Create an instant buy/sell order.
+    Create a market buy/sell order on the Quidax exchange.
     side: 'buy' or 'sell'
     market: e.g. 'btcngn'
     """
     user_id = uid or getattr(settings, 'QUIDAX_USER_ID', 'me')
-    return _call('POST', f'/users/{user_id}/instant_orders', {
+    return _call('POST', f'/users/{user_id}/orders', {
         'market': market,
         'side': side,
+        'ord_type': 'market',
         'volume': volume,
-        'unit': 'base_unit',
     })
 
 
 def get_instant_order(order_id: str, uid: str = None) -> dict:
-    """Fetch status of an instant order."""
+    """Fetch status of a market order."""
     user_id = uid or getattr(settings, 'QUIDAX_USER_ID', 'me')
-    return _call('GET', f'/users/{user_id}/instant_orders/{order_id}')
+    return _call('GET', f'/users/{user_id}/orders/{order_id}')

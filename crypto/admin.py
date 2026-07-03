@@ -61,7 +61,7 @@ class CryptoOrderAdmin(admin.ModelAdmin):
     ordering = ('-created_at',)
     inlines = [CryptoOrderLogInline]
 
-    actions = ['approve_payment', 'confirm_sell_deposit']
+    actions = ['approve_payment', 'confirm_sell_deposit', 'retry_failed_quidax_buy']
 
     @admin.action(description='Mark payment received → trigger buy execution')
     def approve_payment(self, request, queryset):
@@ -93,3 +93,34 @@ class CryptoOrderAdmin(admin.ModelAdmin):
             _execute_sell(order, order.coin_amount)
             updated += 1
         self.message_user(request, f'{updated} sell order(s) confirmed.')
+
+    @admin.action(description='Retry Quidax execution for failed buy orders')
+    def retry_failed_quidax_buy(self, request, queryset):
+        from .views import _debit_ngn_wallet_if_sufficient, _execute_buy_after_payment, _log
+
+        updated = 0
+        skipped = 0
+        for order in queryset.filter(
+            order_type=CryptoOrder.OrderType.BUY,
+            status=CryptoOrder.Status.FAILED,
+        ):
+            was_wallet = order.logs.filter(event='paid_from_wallet').exists()
+            was_refunded = order.logs.filter(event='refunded_after_failure').exists()
+            if was_wallet and was_refunded:
+                if not _debit_ngn_wallet_if_sufficient(order.user, order.total_ngn):
+                    skipped += 1
+                    continue
+
+            order.status = CryptoOrder.Status.PAYMENT_RECEIVED
+            order.save(update_fields=['status', 'updated_at'])
+            _log(order, 'quidax_retry_by_admin', {'admin': request.user.email})
+            _execute_buy_after_payment(
+                order,
+                refund_on_failure=not bool(order.flw_transaction_id),
+            )
+            updated += 1
+
+        msg = f'{updated} failed buy order(s) retried on Quidax.'
+        if skipped:
+            msg += f' {skipped} skipped (insufficient NGN wallet balance to re-debit).'
+        self.message_user(request, msg)

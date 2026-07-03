@@ -1010,7 +1010,7 @@ class CryptoWebhookView(APIView):
 
     Handled events:
       deposit.successful  → credit user's internal CryptoWallet
-      order.completed     → (future) auto-complete Quidax-initiated orders
+      order.done          → finalize buy/sell orders left in PROCESSING
     """
     permission_classes = [AllowAny]
     authentication_classes = []
@@ -1041,8 +1041,8 @@ class CryptoWebhookView(APIView):
 
         if event == 'deposit.successful':
             self._handle_deposit(data)
-        elif event == 'order.completed':
-            self._handle_order_completed(data)
+        elif event in ('order.done', 'order.completed'):
+            self._handle_order_done(data)
         # Unknown events are silently accepted (return 200) to prevent Quidax retries
 
         return Response({'received': True})
@@ -1089,17 +1089,57 @@ class CryptoWebhookView(APIView):
             amount, currency, user.email, network,
         )
 
-    def _handle_order_completed(self, data: dict):
-        """Update an order status if tracked by its Quidax order ID."""
+    def _handle_order_done(self, data: dict):
+        """Finalize Axira orders once Quidax confirms execution."""
         quidax_order_id = str(data.get('id', ''))
         if not quidax_order_id:
             return
-        CryptoOrder.objects.filter(quidax_order_id=quidax_order_id).update(
-            status=CryptoOrder.Status.COMPLETED,
-        )
+
+        try:
+            order = CryptoOrder.objects.get(quidax_order_id=quidax_order_id)
+        except CryptoOrder.DoesNotExist:
+            logger.info('Order webhook: no Axira order for quidax_order_id=%s', quidax_order_id)
+            return
+
+        _finalize_quidax_order(order)
 
 
 # ── Execution helpers (called synchronously for now) ─────────────────────────
+
+def _finalize_quidax_order(order: CryptoOrder):
+    """
+    Credit wallets once Quidax confirms a market order (sync response or webhook).
+    Safe to call multiple times — no-ops if the order is already completed.
+    """
+    if order.status == CryptoOrder.Status.COMPLETED:
+        return
+
+    with transaction.atomic():
+        order = CryptoOrder.objects.select_for_update().get(pk=order.pk)
+        if order.status == CryptoOrder.Status.COMPLETED:
+            return
+
+        if order.order_type == CryptoOrder.OrderType.BUY:
+            _credit_wallet(order.user, order.coin, order.coin_amount)
+            order.status = CryptoOrder.Status.COMPLETED
+            _log(order, 'order_completed', {
+                'coin_amount': str(order.coin_amount),
+                'coin': order.coin,
+                'via': 'quidax_done',
+            })
+        elif order.order_type == CryptoOrder.OrderType.SELL:
+            _deduct_reserved(order.user, order.coin, order.coin_amount)
+            _credit_ngn_wallet(order.user, order.total_ngn)
+            order.status = CryptoOrder.Status.COMPLETED
+            _log(order, 'order_completed', {
+                'payout_ngn': str(order.total_ngn),
+                'via': 'quidax_done',
+            })
+        else:
+            return
+
+        order.save(update_fields=['status', 'updated_at'])
+
 
 def _execute_sell(order: CryptoOrder, coin_amount: Decimal):
     """
@@ -1127,25 +1167,16 @@ def _execute_sell(order: CryptoOrder, coin_amount: Decimal):
 
         order.quidax_order_id = quidax_id
 
+        order.save(update_fields=['quidax_order_id', 'updated_at'])
+
         if quidax_status in ('done', 'completed', 'filled', 'success'):
-            _deduct_reserved(order.user, order.coin, coin_amount)
-            _credit_ngn_wallet(order.user, order.total_ngn)
-            order.status = CryptoOrder.Status.COMPLETED
-            _log(order, 'order_completed', {'payout_ngn': str(order.total_ngn)})
+            _finalize_quidax_order(order)
         else:
             order.status = CryptoOrder.Status.PROCESSING
-
-        order.save(update_fields=['quidax_order_id', 'status', 'updated_at'])
+            order.save(update_fields=['status', 'updated_at'])
 
     except QuidaxError as exc:
-        # Extract real error message from Quidax
         error_msg = str(exc)
-        if hasattr(exc, 'response') and exc.response is not None:
-            try:
-                body = exc.response.json()
-                error_msg = body.get('message') or body.get('error') or exc.response.text or str(exc)
-            except Exception:
-                error_msg = getattr(exc, 'message', str(exc))
 
         logger.error('Quidax sell failed for %s: %s', order.reference, error_msg)
         _log(order, 'quidax_error', {
@@ -1262,24 +1293,16 @@ def _execute_buy_after_payment(order: CryptoOrder, refund_on_failure: bool = Tru
 
         order.quidax_order_id = quidax_id
 
+        order.save(update_fields=['quidax_order_id', 'updated_at'])
+
         if quidax_status in ('done', 'completed', 'filled', 'success'):
-            _credit_wallet(order.user, order.coin, coin_amount)
-            order.status = CryptoOrder.Status.COMPLETED
-            _log(order, 'order_completed', {'coin_amount': str(coin_amount), 'coin': order.coin})
+            _finalize_quidax_order(order)
         else:
             order.status = CryptoOrder.Status.PROCESSING
-
-        order.save(update_fields=['quidax_order_id', 'status', 'updated_at'])
+            order.save(update_fields=['status', 'updated_at'])
 
     except QuidaxError as exc:
-        # Extract the real error message from Quidax (fixes "No message available")
         error_msg = str(exc)
-        if hasattr(exc, 'response') and exc.response is not None:
-            try:
-                body = exc.response.json()
-                error_msg = body.get('message') or body.get('error') or exc.response.text or str(exc)
-            except Exception:
-                error_msg = getattr(exc, 'message', str(exc))
 
         logger.error('Quidax buy failed for %s: %s', order.reference, error_msg)
         _log(order, 'quidax_error', {

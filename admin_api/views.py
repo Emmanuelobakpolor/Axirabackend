@@ -11,7 +11,7 @@ from accounts.models import User
 from accounts.serializers import UserSerializer, UpdateProfileSerializer
 from crypto.models import CryptoFeeSettings, CryptoOrder
 from crypto.quidax import QuidaxError, create_instant_order
-from crypto.views import SUPPORTED_COINS, _order_dict
+from crypto.views import SUPPORTED_COINS, _finalize_quidax_order, _order_dict
 from giftcards.models import GiftCardBuy, GiftCardSale
 from wallet.models import Transaction, Wallet
 
@@ -444,15 +444,25 @@ class AdminCryptoOrderActionView(APIView):
                         volume=str(order.coin_amount),
                     )
                     order.quidax_order_id = str(result.get('id', ''))
+                    order.note = note or 'Approved by admin.'
+                    order.save(update_fields=['note', 'quidax_order_id', 'updated_at'])
+
+                    quidax_status = str(result.get('status', '')).lower()
+                    if quidax_status in ('done', 'completed', 'filled', 'success'):
+                        _finalize_quidax_order(order)
+                    else:
+                        order.status = CryptoOrder.Status.PROCESSING
+                        order.save(update_fields=['status', 'updated_at'])
                 except QuidaxError as e:
                     return Response(
                         {'error': f'Quidax execution failed: {e}'},
                         status=status.HTTP_502_BAD_GATEWAY,
                     )
+            else:
+                order.status = CryptoOrder.Status.COMPLETED
+                order.note = note or 'Approved by admin.'
+                order.save(update_fields=['status', 'note', 'updated_at'])
 
-            order.status = CryptoOrder.Status.COMPLETED
-            order.note = note or 'Approved by admin.'
-            order.save(update_fields=['status', 'note', 'quidax_order_id', 'updated_at'])
             return Response({'status': order.status, 'reference': reference})
 
         return Response({'error': 'action must be "approve" or "reject".'}, status=400)

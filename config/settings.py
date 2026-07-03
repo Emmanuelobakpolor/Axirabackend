@@ -50,6 +50,7 @@ RELOADLY_NGN_PER_USD = float(os.environ.get("RELOADLY_NGN_PER_USD", "1700"))
 # ── Quidax (crypto buy/sell/swap) ─────────────────────────────────────────────
 QUIDAX_SECRET_KEY = os.environ.get("QUIDAX_SECRET_KEY", "")
 QUIDAX_USER_ID = os.environ.get("QUIDAX_USER_ID", "me")  # 'me' = master account
+QUIDAX_WEBHOOK_SECRET = os.environ.get("QUIDAX_WEBHOOK_SECRET", "")
 
 # NGN/USD rate for converting flat USD fees → NGN
 NGN_PER_USD = float(os.environ.get("NGN_PER_USD", "1600"))
