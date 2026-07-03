@@ -8,6 +8,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import logging
+from decimal import Decimal
 
 from django.conf import settings
 
@@ -156,6 +157,18 @@ def get_wallet(uid: str, currency: str) -> dict:
 
 # ── Trade Execution ─────────────────────────────────────────────────────────
 
+def _plain_decimal_str(value) -> str:
+    """
+    Strip insignificant trailing zeros without falling back to exponential
+    notation (Decimal.normalize() alone turns e.g. 100 into '1E+2'). Quidax
+    validates the literal decimal places in the volume string against each
+    market's precision limit — many NGN pairs (e.g. XRP/NGN) allow 0 decimal
+    places, so an internally-padded '1.00000000' gets rejected even though
+    the value 1 is valid.
+    """
+    return format(Decimal(str(value)).normalize(), 'f')
+
+
 def create_instant_order(side: str, market: str, volume: str, uid: str = None) -> dict:
     """
     Create a market buy/sell order on the Quidax exchange.
@@ -167,7 +180,7 @@ def create_instant_order(side: str, market: str, volume: str, uid: str = None) -
         'market': market,
         'side': side,
         'ord_type': 'market',
-        'volume': volume,
+        'volume': _plain_decimal_str(volume),
     })
 
 
