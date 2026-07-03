@@ -1115,6 +1115,7 @@ def _execute_sell(order: CryptoOrder, coin_amount: Decimal):
         'side': 'sell',
         'volume': str(coin_amount),
     })
+
     try:
         result = create_instant_order(
             side='sell',
@@ -1122,13 +1123,11 @@ def _execute_sell(order: CryptoOrder, coin_amount: Decimal):
             volume=str(coin_amount),
         )
         quidax_id = str(result.get('id', ''))
-        quidax_status = str(result.get('status', ''))
-        _log(order, 'quidax_response_received', {
-            'order_id': quidax_id, 'status': quidax_status,
-        })
+        quidax_status = str(result.get('status', '')).lower()
 
         order.quidax_order_id = quidax_id
-        if quidax_status in ('done', 'completed', 'filled'):
+
+        if quidax_status in ('done', 'completed', 'filled', 'success'):
             _deduct_reserved(order.user, order.coin, coin_amount)
             _credit_ngn_wallet(order.user, order.total_ngn)
             order.status = CryptoOrder.Status.COMPLETED
@@ -1139,8 +1138,21 @@ def _execute_sell(order: CryptoOrder, coin_amount: Decimal):
         order.save(update_fields=['quidax_order_id', 'status', 'updated_at'])
 
     except QuidaxError as exc:
-        logger.error('Quidax sell failed for %s: %s', order.reference, exc)
-        _log(order, 'quidax_error', {'error': str(exc)})
+        # Extract real error message from Quidax
+        error_msg = str(exc)
+        if hasattr(exc, 'response') and exc.response is not None:
+            try:
+                body = exc.response.json()
+                error_msg = body.get('message') or body.get('error') or exc.response.text or str(exc)
+            except Exception:
+                error_msg = getattr(exc, 'message', str(exc))
+
+        logger.error('Quidax sell failed for %s: %s', order.reference, error_msg)
+        _log(order, 'quidax_error', {
+            'error': error_msg,
+            'raw_exception': str(exc),
+        })
+
         _release_reserved(order.user, order.coin, coin_amount)
         order.status = CryptoOrder.Status.FAILED
         order.save(update_fields=['status', 'updated_at'])
@@ -1194,8 +1206,21 @@ def _execute_swap(order: CryptoOrder):
         })
 
     except QuidaxError as exc:
-        logger.error('Quidax swap failed for %s: %s', order.reference, exc)
-        _log(order, 'quidax_error', {'error': str(exc)})
+        # Extract real error message from Quidax
+        error_msg = str(exc)
+        if hasattr(exc, 'response') and exc.response is not None:
+            try:
+                body = exc.response.json()
+                error_msg = body.get('message') or body.get('error') or exc.response.text or str(exc)
+            except Exception:
+                error_msg = getattr(exc, 'message', str(exc))
+
+        logger.error('Quidax swap failed for %s: %s', order.reference, error_msg)
+        _log(order, 'quidax_error', {
+            'error': error_msg,
+            'raw_exception': str(exc),
+        })
+
         _release_reserved(order.user, order.coin, coin_amount)
         order.status = CryptoOrder.Status.FAILED
         order.save(update_fields=['status', 'updated_at'])
@@ -1225,6 +1250,7 @@ def _execute_buy_after_payment(order: CryptoOrder, refund_on_failure: bool = Tru
 
     coin_amount = order.coin_amount
     _log(order, 'quidax_buy_sent', {'coin': order.coin, 'amount': str(coin_amount)})
+
     try:
         result = create_instant_order(
             side='buy',
@@ -1232,11 +1258,11 @@ def _execute_buy_after_payment(order: CryptoOrder, refund_on_failure: bool = Tru
             volume=str(coin_amount),
         )
         quidax_id = str(result.get('id', ''))
-        quidax_status = str(result.get('status', ''))
-        _log(order, 'quidax_buy_received', {'order_id': quidax_id, 'status': quidax_status})
+        quidax_status = str(result.get('status', '')).lower()
 
         order.quidax_order_id = quidax_id
-        if quidax_status in ('done', 'completed', 'filled'):
+
+        if quidax_status in ('done', 'completed', 'filled', 'success'):
             _credit_wallet(order.user, order.coin, coin_amount)
             order.status = CryptoOrder.Status.COMPLETED
             _log(order, 'order_completed', {'coin_amount': str(coin_amount), 'coin': order.coin})
@@ -1246,13 +1272,27 @@ def _execute_buy_after_payment(order: CryptoOrder, refund_on_failure: bool = Tru
         order.save(update_fields=['quidax_order_id', 'status', 'updated_at'])
 
     except QuidaxError as exc:
-        logger.error('Quidax buy failed for %s: %s', order.reference, exc)
-        _log(order, 'quidax_error', {'error': str(exc)})
+        # Extract the real error message from Quidax (fixes "No message available")
+        error_msg = str(exc)
+        if hasattr(exc, 'response') and exc.response is not None:
+            try:
+                body = exc.response.json()
+                error_msg = body.get('message') or body.get('error') or exc.response.text or str(exc)
+            except Exception:
+                error_msg = getattr(exc, 'message', str(exc))
+
+        logger.error('Quidax buy failed for %s: %s', order.reference, error_msg)
+        _log(order, 'quidax_error', {
+            'error': error_msg,
+            'raw_exception': str(exc),
+        })
+
         if refund_on_failure:
             _credit_ngn_wallet(order.user, order.total_ngn)
             _log(order, 'refunded_after_failure', {'amount': str(order.total_ngn)})
         else:
             _log(order, 'not_refunded_after_failure', {'amount': str(order.total_ngn)})
+
         order.status = CryptoOrder.Status.FAILED
         order.save(update_fields=['status', 'updated_at'])
 
@@ -1304,12 +1344,18 @@ def _buy_response(order: CryptoOrder) -> dict:
         # Flutterwave isn't configured at all — manual bank-transfer fallback.
         resp['bank_details'] = _AXIRA_BANK
     elif order.status == CryptoOrder.Status.FAILED:
-        # Surface the real failure reason instead of making the user dig
-        # through Django admin for it.
+        # Surface the real failure reason (fixes "No message available" in Flutter)
         last_error = order.logs.filter(event='quidax_error').order_by('-created_at').first()
         if last_error:
-            resp['error_detail'] = str(last_error.detail.get('error', ''))
+            resp['error_detail'] = last_error.detail.get('error') or 'Quidax execution failed. Please try again.'
+            # Optional: include raw info for debugging (remove in production if sensitive)
+            if last_error.detail.get('raw_exception'):
+                resp['debug_raw'] = last_error.detail.get('raw_exception')
+        else:
+            resp['error_detail'] = 'Purchase failed. Please try again or contact support.'
+
         resp['refunded'] = order.logs.filter(event='refunded_after_failure').exists()
+        resp['message'] = f"Purchase failed. {resp.get('error_detail', '')}"
     return resp
 
 
