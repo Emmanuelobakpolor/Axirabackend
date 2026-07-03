@@ -188,3 +188,31 @@ def get_instant_order(order_id: str, uid: str = None) -> dict:
     """Fetch status of a market order."""
     user_id = uid or getattr(settings, 'QUIDAX_USER_ID', 'me')
     return _call('GET', f'/users/{user_id}/orders/{order_id}')
+
+
+# ── Withdrawals ────────────────────────────────────────────────────────────
+
+def create_withdrawal(
+    currency: str,
+    amount: str,
+    address: str,
+    network: str = '',
+    reference: str = '',
+    uid: str = None,
+) -> dict:
+    """
+    Send crypto out to an external address. Executes immediately on Quidax's
+    side (status starts 'processing') — final outcome arrives later via the
+    withdraw.successful / withdraw.rejected webhook, not in this response.
+    """
+    user_id = uid or getattr(settings, 'QUIDAX_USER_ID', 'me')
+    payload = {
+        'currency': currency.lower(),
+        'amount': _plain_decimal_str(amount),
+        'fund_uid': address,
+    }
+    if network:
+        payload['network'] = network
+    if reference:
+        payload['reference'] = reference
+    return _call('POST', f'/users/{user_id}/withdraws', payload)

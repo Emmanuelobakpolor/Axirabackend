@@ -13,6 +13,8 @@ from .views import (
     CryptoUploadProofView,
     CryptoWalletView,
     CryptoWebhookView,
+    CryptoWithdrawalsView,
+    CryptoWithdrawView,
 )
 
 urlpatterns = [
@@ -35,8 +37,10 @@ urlpatterns = [
     path('crypto/orders/swap/', CryptoSwapOrderView.as_view()),
     path('crypto/orders/<str:reference>/proof/', CryptoUploadProofView.as_view()),
 
+    # Withdrawals (send crypto to an external address)
+    path('crypto/withdraw/', CryptoWithdrawView.as_view()),
+    path('crypto/withdrawals/', CryptoWithdrawalsView.as_view()),
+
     # Webhook (no auth — HMAC verified internally)
     path('crypto/webhook/quidax/', CryptoWebhookView.as_view()),
-
-
 ]

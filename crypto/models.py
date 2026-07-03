@@ -11,6 +11,7 @@ class CryptoFeeSettings(models.Model):
         BUY = 'buy', 'Buy'
         SELL = 'sell', 'Sell'
         SWAP = 'swap', 'Swap'
+        WITHDRAW = 'withdraw', 'Withdraw'
 
     fee_type = models.CharField(max_length=10, choices=FeeType.choices, unique=True)
     flat_usd = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0'))
@@ -221,3 +222,73 @@ class CryptoOrderLog(models.Model):
 
     def __str__(self):
         return f"[{self.order.reference}] {self.event}"
+
+
+class CryptoWithdrawal(models.Model):
+    """
+    An outbound on-chain transfer of crypto to an address outside Axira.
+    Executes immediately against Quidax (no admin approval step) — the
+    balance reservation in _reserve_balance and the checks in the view are
+    the only guard before funds leave custody, so treat changes here with
+    the same care as CryptoOrder's Quidax execution path.
+    """
+    class Status(models.TextChoices):
+        PROCESSING = 'processing', 'Processing'   # Quidax accepted, awaiting webhook
+        COMPLETED = 'completed', 'Completed'
+        FAILED = 'failed', 'Failed'                # our-side failure (pre-Quidax)
+        REJECTED = 'rejected', 'Rejected'          # Quidax rejected the withdrawal
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='crypto_withdrawals',
+    )
+    coin = models.CharField(max_length=20)
+    network = models.CharField(max_length=30, blank=True)
+    address = models.CharField(max_length=200)
+    amount = models.DecimalField(max_digits=20, decimal_places=8)
+    fee = models.DecimalField(max_digits=20, decimal_places=8, default=Decimal('0'))
+    quidax_withdrawal_id = models.CharField(max_length=100, blank=True)
+    tx_id = models.CharField(max_length=200, blank=True)
+    reference = models.CharField(max_length=40, unique=True, blank=True)
+    idempotency_key = models.CharField(max_length=100, unique=True, null=True, blank=True, db_index=True)
+    note = models.TextField(blank=True)
+    status = models.CharField(
+        max_length=15, choices=Status.choices, default=Status.PROCESSING
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['user', '-created_at']),
+            models.Index(fields=['status']),
+        ]
+
+    def save(self, *args, **kwargs):
+        if not self.reference:
+            self.reference = f"CRW{uuid.uuid4().hex[:16].upper()}"
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"withdraw {self.amount} {self.coin} -> {self.address[:12]}... [{self.status}] - {self.user.email}"
+
+
+class CryptoWithdrawalLog(models.Model):
+    """Immutable audit trail for every significant event on a withdrawal."""
+    withdrawal = models.ForeignKey(CryptoWithdrawal, on_delete=models.CASCADE, related_name='logs')
+    event = models.CharField(max_length=60)
+    detail = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['created_at']
+
+    @classmethod
+    def log(cls, withdrawal, event, detail=None):
+        cls.objects.create(withdrawal=withdrawal, event=event, detail=detail or {})
+
+    def __str__(self):
+        return f"[{self.withdrawal.reference}] {self.event}"

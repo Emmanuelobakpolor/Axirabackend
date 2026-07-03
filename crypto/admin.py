@@ -7,6 +7,8 @@ from .models import (
     CryptoOrderLog,
     CryptoQuote,
     CryptoWallet,
+    CryptoWithdrawal,
+    CryptoWithdrawalLog,
 )
 
 
@@ -124,3 +126,59 @@ class CryptoOrderAdmin(admin.ModelAdmin):
         if skipped:
             msg += f' {skipped} skipped (insufficient NGN wallet balance to re-debit).'
         self.message_user(request, msg)
+
+
+class CryptoWithdrawalLogInline(admin.TabularInline):
+    model = CryptoWithdrawalLog
+    extra = 0
+    readonly_fields = ('event', 'detail', 'created_at')
+    can_delete = False
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(CryptoWithdrawal)
+class CryptoWithdrawalAdmin(admin.ModelAdmin):
+    """
+    Withdrawals execute instantly with no approval step, so this is mainly
+    for visibility — plus a manual safety valve (below) for the rare case
+    where Quidax's withdraw.successful/rejected webhook never arrives and a
+    withdrawal is stuck in PROCESSING after being confirmed on Quidax's own
+    dashboard.
+    """
+    list_display = ('reference', 'user', 'coin', 'network', 'amount', 'fee', 'status', 'created_at')
+    list_filter = ('status', 'coin', 'network')
+    search_fields = ('reference', 'address', 'user__email', 'user__full_name', 'quidax_withdrawal_id')
+    readonly_fields = ('id', 'reference', 'idempotency_key', 'created_at', 'updated_at')
+    ordering = ('-created_at',)
+    inlines = [CryptoWithdrawalLogInline]
+
+    actions = ['mark_completed', 'mark_rejected_and_refund']
+
+    @admin.action(description='Mark selected as completed (use only if confirmed on Quidax dashboard)')
+    def mark_completed(self, request, queryset):
+        from .views import _wlog
+
+        updated = 0
+        for w in queryset.exclude(status=CryptoWithdrawal.Status.COMPLETED):
+            w.status = CryptoWithdrawal.Status.COMPLETED
+            w.save(update_fields=['status', 'updated_at'])
+            _wlog(w, 'withdrawal_completed_by_admin', {'admin': request.user.email})
+            updated += 1
+        self.message_user(request, f'{updated} withdrawal(s) marked completed.')
+
+    @admin.action(description='Mark selected as rejected and refund wallet')
+    def mark_rejected_and_refund(self, request, queryset):
+        from .views import _credit_wallet, _wlog
+
+        updated = 0
+        for w in queryset.exclude(
+            status__in=(CryptoWithdrawal.Status.COMPLETED, CryptoWithdrawal.Status.REJECTED),
+        ):
+            w.status = CryptoWithdrawal.Status.REJECTED
+            w.save(update_fields=['status', 'updated_at'])
+            _credit_wallet(w.user, w.coin, w.amount)
+            _wlog(w, 'withdrawal_rejected_refunded_by_admin', {'admin': request.user.email})
+            updated += 1
+        self.message_user(request, f'{updated} withdrawal(s) marked rejected and refunded.')
