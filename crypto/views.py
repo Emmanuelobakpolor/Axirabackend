@@ -543,6 +543,22 @@ class CryptoPricesView(APIView):
         return Response({'prices': prices, 'coins': coins})
 
 
+class CryptoDebugMarketsView(APIView):
+    """
+    TEMPORARY — lists every market symbol Quidax actually returns tickers
+    for, so SUPPORTED_COINS can be corrected against ground truth instead of
+    guessed ticker slugs. Remove once the coin list has been reconciled.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        try:
+            tickers = get_all_tickers()
+        except QuidaxError as exc:
+            return Response({'error': str(exc)}, status=502)
+        return Response({'markets': sorted(tickers.keys())})
+
+
 class CryptoFeesView(APIView):
     """Current fee config — public, Flutter uses for estimate display only."""
     permission_classes = [AllowAny]

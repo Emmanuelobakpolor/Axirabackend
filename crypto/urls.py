@@ -2,6 +2,7 @@ from django.urls import path
 
 from .views import (
     CryptoBuyOrderView,
+    CryptoDebugMarketsView,
     CryptoDepositAddressView,
     CryptoFeesView,
     CryptoOrdersView,
@@ -18,6 +19,7 @@ urlpatterns = [
     # Public-ish data
     path('crypto/prices/', CryptoPricesView.as_view()),
     path('crypto/fees/', CryptoFeesView.as_view()),
+    path('crypto/debug/markets/', CryptoDebugMarketsView.as_view()),  # TEMPORARY — remove after reconciling coin list
 
     # Quote — must call before placing any order
     path('crypto/quote/', CryptoQuoteView.as_view()),
