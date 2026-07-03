@@ -1295,6 +1295,12 @@ def _buy_response(order: CryptoOrder) -> dict:
     elif order.status == CryptoOrder.Status.PENDING_PAYMENT:
         # Flutterwave isn't configured at all — manual bank-transfer fallback.
         resp['bank_details'] = _AXIRA_BANK
+    elif order.status == CryptoOrder.Status.FAILED:
+        # Surface the real failure reason instead of making the user dig
+        # through Django admin for it.
+        last_error = order.logs.filter(event='quidax_error').order_by('-created_at').first()
+        if last_error:
+            resp['error_detail'] = str(last_error.detail.get('error', ''))
     return resp
 
 
