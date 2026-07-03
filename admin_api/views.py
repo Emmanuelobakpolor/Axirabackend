@@ -11,7 +11,7 @@ from accounts.models import User
 from accounts.serializers import UserSerializer, UpdateProfileSerializer
 from crypto.models import CryptoFeeSettings, CryptoOrder
 from crypto.quidax import QuidaxError, create_instant_order
-from crypto.views import SUPPORTED_COINS, _finalize_quidax_order, _order_dict
+from crypto.views import SUPPORTED_COINS, _finalize_quidax_order, _ngn_volume_str, _order_dict
 from giftcards.models import GiftCardBuy, GiftCardSale
 from wallet.models import Transaction, Wallet
 
@@ -437,11 +437,18 @@ class AdminCryptoOrderActionView(APIView):
                 else:
                     side = 'sell'  # swap: sell leg already attempted at order creation
 
+                # Quidax market buys are NGN-denominated, sells are crypto-denominated.
+                volume = (
+                    _ngn_volume_str(order.rate_ngn * order.coin_amount)
+                    if side == 'buy'
+                    else str(order.coin_amount)
+                )
+
                 try:
                     result = create_instant_order(
                         side=side,
                         market=market,
-                        volume=str(order.coin_amount),
+                        volume=volume,
                     )
                     order.quidax_order_id = str(result.get('id', ''))
                     order.note = note or 'Approved by admin.'

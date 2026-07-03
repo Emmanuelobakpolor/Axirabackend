@@ -3,7 +3,7 @@ import hmac
 import json
 import logging
 from datetime import timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_DOWN, Decimal, InvalidOperation
 
 from django.conf import settings
 from django.db import transaction
@@ -220,6 +220,10 @@ def _logo_url(coin: str) -> str:
 
 QUOTE_TTL_SECONDS = 30
 
+# Quidax rejects any order (or swap leg) worth less than this with error
+# 110112 "Price is below allowed minimum buy price."
+QUIDAX_MIN_NGN_ORDER = Decimal('1000')
+
 _NGN_PER_USD = Decimal(str(getattr(settings, 'NGN_PER_USD', '1600')))
 
 def handle_flw_crypto_charge(data: dict):
@@ -302,6 +306,18 @@ def _compute_fee(fee: CryptoFeeSettings, ngn_amount: Decimal) -> Decimal:
     flat_ngn = fee.flat_usd * _NGN_PER_USD
     pct_ngn = ngn_amount * fee.percent / Decimal('100')
     return (flat_ngn + pct_ngn).quantize(Decimal('0.01'))
+
+
+def _ngn_volume_str(ngn_amount: Decimal) -> str:
+    """
+    Quidax market buys are NGN-denominated, not crypto-denominated — per
+    Quidax's own support docs: "For a market BUY, input the amount of NGN
+    you want to transact" (market sells use crypto quantity instead, which
+    is what str(coin_amount) already gives us elsewhere). NGN volumes only
+    accept whole Naira, so this floors rather than rounds to guarantee we
+    never send Quidax more NGN than was actually collected for the trade.
+    """
+    return str(ngn_amount.quantize(Decimal('1'), rounding=ROUND_DOWN))
 
 
 def _parse_decimal(value, field_name: str) -> Decimal:
@@ -621,6 +637,16 @@ class CryptoQuoteView(APIView):
         ngn_value = (coin_amount * rate_ngn).quantize(Decimal('0.01'))
         fee_ngn = _compute_fee(fee_obj, ngn_value)
 
+        # Only enforce Quidax's own order minimum when a quote will actually
+        # be executed on Quidax — orders queued for manual admin handling
+        # (no QUIDAX_SECRET_KEY) never hit this limit.
+        quidax_live = bool(getattr(settings, 'QUIDAX_SECRET_KEY', ''))
+        if quidax_live and ngn_value < QUIDAX_MIN_NGN_ORDER:
+            return Response(
+                {'error': f'Minimum order value is ₦{QUIDAX_MIN_NGN_ORDER:,.0f}.'},
+                status=400,
+            )
+
         if quote_type == 'buy':
             total_ngn = ngn_value + fee_ngn
             to_coin_amount = Decimal('0')
@@ -629,8 +655,11 @@ class CryptoQuoteView(APIView):
             to_coin_amount = Decimal('0')
         else:  # swap
             net_ngn = ngn_value - fee_ngn
-            if net_ngn <= 0:
-                return Response({'error': 'Amount too small to cover swap fee.'}, status=400)
+            if net_ngn <= 0 or (quidax_live and net_ngn < QUIDAX_MIN_NGN_ORDER):
+                return Response(
+                    {'error': f'Amount too small — minimum is ₦{QUIDAX_MIN_NGN_ORDER:,.0f} after fees.'},
+                    status=400,
+                )
             total_ngn = ngn_value
             to_coin_amount = (net_ngn / to_rate_ngn).quantize(Decimal('0.00000001'))
 
@@ -1213,12 +1242,19 @@ def _execute_swap(order: CryptoOrder):
             'id': sell_result.get('id'), 'status': sell_result.get('status'),
         })
 
-        # Leg 2: buy to_coin with NGN
-        _log(order, 'quidax_buy_sent', {'coin': order.to_coin, 'amount': str(order.to_coin_amount)})
+        # Leg 2: buy to_coin with the NGN proceeds from leg 1 minus the swap
+        # fee — Quidax market buys are NGN-denominated, not crypto-denominated.
+        net_ngn = order.rate_ngn * coin_amount - order.fee_ngn
+        ngn_volume = _ngn_volume_str(net_ngn)
+        _log(order, 'quidax_buy_sent', {
+            'coin': order.to_coin,
+            'expected_amount': str(order.to_coin_amount),
+            'ngn_volume': ngn_volume,
+        })
         buy_result = create_instant_order(
             side='buy',
             market=SUPPORTED_COINS[order.to_coin],
-            volume=str(order.to_coin_amount),
+            volume=ngn_volume,
         )
         _log(order, 'quidax_buy_received', {
             'id': buy_result.get('id'), 'status': buy_result.get('status'),
@@ -1280,13 +1316,16 @@ def _execute_buy_after_payment(order: CryptoOrder, refund_on_failure: bool = Tru
         return
 
     coin_amount = order.coin_amount
-    _log(order, 'quidax_buy_sent', {'coin': order.coin, 'amount': str(coin_amount)})
+    ngn_volume = _ngn_volume_str(order.rate_ngn * coin_amount)
+    _log(order, 'quidax_buy_sent', {
+        'coin': order.coin, 'amount': str(coin_amount), 'ngn_volume': ngn_volume,
+    })
 
     try:
         result = create_instant_order(
             side='buy',
             market=SUPPORTED_COINS[order.coin],
-            volume=str(coin_amount),
+            volume=ngn_volume,
         )
         quidax_id = str(result.get('id', ''))
         quidax_status = str(result.get('status', '')).lower()
