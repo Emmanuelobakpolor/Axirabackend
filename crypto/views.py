@@ -280,7 +280,7 @@ def handle_flw_crypto_charge(data: dict):
             'amount_paid': str(amount_paid),
         })
 
-    _execute_buy_after_payment(order)
+    _execute_buy_after_payment(order, refund_on_failure=False)
 
 _AXIRA_BANK = {
     'bank_name':      getattr(settings, 'AXIRA_BANK_NAME', ''),
@@ -826,7 +826,7 @@ class CryptoBuyVerifyView(APIView):
         order.save(update_fields=['status', 'flw_transaction_id', 'updated_at'])
         _log(order, 'flw_payment_confirmed', {'amount': str(flw_amount)})
 
-        _execute_buy_after_payment(order)
+        _execute_buy_after_payment(order, refund_on_failure=False)
 
         return Response(_buy_response(order))
 
@@ -1201,12 +1201,20 @@ def _execute_swap(order: CryptoOrder):
         order.save(update_fields=['status', 'updated_at'])
 
 
-def _execute_buy_after_payment(order: CryptoOrder):
+def _execute_buy_after_payment(order: CryptoOrder, refund_on_failure: bool = True):
     """
     Called once payment is confirmed (wallet debit, Flutterwave verify, or
     webhook). Buys on Quidax and credits the crypto wallet. Guarded against
     double-execution since more than one of those paths can fire for the
     same order.
+
+    refund_on_failure controls what happens if the Quidax buy itself fails
+    after payment was confirmed:
+      - True  (wallet-balance buys): safe to auto-refund — it's purely an
+        internal ledger reversal, no external money was ever involved.
+      - False (Flutterwave buys): real external money already moved to the
+        merchant account, so failures are left for manual review instead of
+        being auto-resolved by crediting the internal wallet.
     """
     if order.status == CryptoOrder.Status.COMPLETED:
         return
@@ -1240,11 +1248,11 @@ def _execute_buy_after_payment(order: CryptoOrder):
     except QuidaxError as exc:
         logger.error('Quidax buy failed for %s: %s', order.reference, exc)
         _log(order, 'quidax_error', {'error': str(exc)})
-        # Payment was already confirmed (wallet debit or Flutterwave) by the
-        # time this runs — refund the NGN so a Quidax-side failure doesn't
-        # cost the user money for crypto they never received.
-        _credit_ngn_wallet(order.user, order.total_ngn)
-        _log(order, 'refunded_after_failure', {'amount': str(order.total_ngn)})
+        if refund_on_failure:
+            _credit_ngn_wallet(order.user, order.total_ngn)
+            _log(order, 'refunded_after_failure', {'amount': str(order.total_ngn)})
+        else:
+            _log(order, 'not_refunded_after_failure', {'amount': str(order.total_ngn)})
         order.status = CryptoOrder.Status.FAILED
         order.save(update_fields=['status', 'updated_at'])
 
@@ -1301,6 +1309,7 @@ def _buy_response(order: CryptoOrder) -> dict:
         last_error = order.logs.filter(event='quidax_error').order_by('-created_at').first()
         if last_error:
             resp['error_detail'] = str(last_error.detail.get('error', ''))
+        resp['refunded'] = order.logs.filter(event='refunded_after_failure').exists()
     return resp
 
 
