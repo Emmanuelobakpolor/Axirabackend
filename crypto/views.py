@@ -222,48 +222,6 @@ QUOTE_TTL_SECONDS = 30
 
 _NGN_PER_USD = Decimal(str(getattr(settings, 'NGN_PER_USD', '1600')))
 
-def _create_flw_payment_link(order: 'CryptoOrder') -> str:
-    """
-    Create a Flutterwave hosted-checkout link for the given buy order.
-    Delegates to wallet.flutterwave which already has the API client.
-    Returns the payment URL string.
-    """
-    from wallet.flutterwave import FlutterwaveError, _call as flw_call
-
-    if not getattr(settings, 'FLUTTERWAVE_SECRET_KEY', ''):
-        raise ValueError('FLUTTERWAVE_SECRET_KEY is not configured.')
-
-    user = order.user
-    redirect_url = getattr(
-        settings, 'FLUTTERWAVE_REDIRECT_URL',
-        'https://web-production-b557d.up.railway.app/api/crypto/payment/done/',
-    )
-    try:
-        data = flw_call('POST', '/payments', {
-            'tx_ref': order.reference,
-            'amount': float(order.total_ngn),
-            'currency': 'NGN',
-            'redirect_url': redirect_url,
-            'customer': {
-                'email': user.email,
-                'name': user.full_name,
-                'phonenumber': getattr(user, 'phone', ''),
-            },
-            'customizations': {
-                'title': f'Buy {order.coin} on Axira',
-                'description': f'{order.coin_amount} {order.coin}',
-            },
-            'payment_options': 'card,banktransfer,ussd',
-        })
-    except FlutterwaveError as exc:
-        raise ValueError(str(exc))
-
-    link = data.get('data', {}).get('link', '')
-    if not link:
-        raise ValueError('Flutterwave did not return a payment link.')
-    return link
-
-
 def handle_flw_crypto_charge(data: dict):
     """
     Called from the wallet Flutterwave webhook when tx_ref starts with 'CRY'.
@@ -437,6 +395,21 @@ def _release_reserved(user, coin: str, amount: Decimal) -> None:
         reserved=F('reserved') - amount,
         available=F('available') + amount,
     )
+
+
+def _debit_ngn_wallet_if_sufficient(user, amount: Decimal) -> bool:
+    """
+    Atomically deduct amount from the user's NGN wallet if the balance
+    covers it. Returns True if successful, False if insufficient (or no
+    wallet exists yet) — mirrors _reserve_balance's conditional-update
+    pattern for crypto wallets.
+    """
+    from wallet.models import Wallet
+    with transaction.atomic():
+        updated = Wallet.objects.filter(
+            user=user, ngn_balance__gte=amount,
+        ).update(ngn_balance=F('ngn_balance') - amount)
+        return updated > 0
 
 
 def _deduct_reserved(user, coin: str, amount: Decimal) -> None:
@@ -726,11 +699,13 @@ class CryptoBuyOrderView(APIView):
     """
     Place a buy order using a valid quote.
 
-    If FLUTTERWAVE_SECRET_KEY is configured, returns a Flutterwave hosted-
-    checkout link. Payment confirmation is fully automated via the
-    /crypto/webhook/flutterwave/ endpoint.
-
-    If not configured, falls back to manual bank-transfer flow.
+    If the user's NGN wallet balance covers the total, it's debited and the
+    buy executes immediately — no Flutterwave involved. Otherwise, the
+    response carries a Flutterwave public key + customer info for an in-app
+    SDK charge (flutterwave_standard); the client must then POST the
+    reference to /crypto/orders/buy/verify/ to confirm payment server-side
+    before the buy executes. Falls back to manual bank transfer if
+    Flutterwave isn't configured at all.
 
     POST body: { quote_id, idempotency_key }
     """
@@ -771,18 +746,89 @@ class CryptoBuyOrderView(APIView):
             'quote_id': quote_id,
         })
 
-        # Generate Flutterwave payment link if configured
-        if getattr(settings, 'FLUTTERWAVE_SECRET_KEY', ''):
-            try:
-                payment_url = _create_flw_payment_link(order)
-                order.flw_payment_url = payment_url
-                order.save(update_fields=['flw_payment_url', 'updated_at'])
-                _log(order, 'flw_payment_link_created', {'url': payment_url})
-            except ValueError as exc:
-                logger.error('Failed to create Flutterwave link for %s: %s', order.reference, exc)
-                # Fall through — return order with bank details fallback
+        # Pay instantly from the NGN wallet if the balance covers it.
+        if _debit_ngn_wallet_if_sufficient(request.user, order.total_ngn):
+            _log(order, 'paid_from_wallet', {'amount': str(order.total_ngn)})
+            order.status = CryptoOrder.Status.PAYMENT_RECEIVED
+            order.save(update_fields=['status', 'updated_at'])
+            _execute_buy_after_payment(order)
 
         return Response(_buy_response(order), status=201)
+
+
+class CryptoBuyVerifyView(APIView):
+    """
+    Confirm a Flutterwave in-app charge for a buy order, then execute it.
+
+    Called by the client immediately after flutterwave_standard's SDK
+    reports a successful charge. Verifies server-side with Flutterwave
+    (status + amount) before crediting anything — mirrors
+    wallet.views.WalletViewSet.verify_payment. The order's own reference
+    doubles as the Flutterwave tx_ref.
+
+    POST body: { reference }
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        reference = str(request.data.get('reference', '')).strip()
+        if not reference:
+            return Response({'error': 'reference is required.'}, status=400)
+
+        try:
+            order = CryptoOrder.objects.get(
+                reference=reference,
+                user=request.user,
+                order_type=CryptoOrder.OrderType.BUY,
+            )
+        except CryptoOrder.DoesNotExist:
+            return Response({'error': 'Order not found.'}, status=404)
+
+        if order.status == CryptoOrder.Status.COMPLETED:
+            return Response(_buy_response(order))
+
+        if order.status not in (
+            CryptoOrder.Status.PENDING_PAYMENT,
+            CryptoOrder.Status.PAYMENT_RECEIVED,
+        ):
+            return Response(
+                {'error': f'Order cannot be verified from status "{order.status}".'},
+                status=400,
+            )
+
+        from wallet.flutterwave import FlutterwaveError, verify_transaction
+
+        try:
+            result = verify_transaction(reference)
+        except FlutterwaveError as exc:
+            return Response({'error': str(exc)}, status=502)
+
+        flw_data = result.get('data', {})
+        flw_status = str(flw_data.get('status', ''))
+
+        if result.get('status') != 'success' or flw_status != 'successful':
+            _log(order, 'flw_verify_failed', {'flw_status': flw_status})
+            return Response({'error': 'Payment not confirmed by Flutterwave.'}, status=400)
+
+        try:
+            flw_amount = Decimal(str(flw_data.get('amount', 0)))
+        except InvalidOperation:
+            flw_amount = Decimal('0')
+
+        if flw_amount < order.total_ngn:
+            _log(order, 'flw_amount_mismatch', {
+                'expected': str(order.total_ngn), 'received': str(flw_amount),
+            })
+            return Response({'error': 'Payment amount mismatch.'}, status=400)
+
+        order.status = CryptoOrder.Status.PAYMENT_RECEIVED
+        order.flw_transaction_id = str(flw_data.get('id', ''))
+        order.save(update_fields=['status', 'flw_transaction_id', 'updated_at'])
+        _log(order, 'flw_payment_confirmed', {'amount': str(flw_amount)})
+
+        _execute_buy_after_payment(order)
+
+        return Response(_buy_response(order))
 
 
 class CryptoSellOrderView(APIView):
@@ -1156,7 +1202,15 @@ def _execute_swap(order: CryptoOrder):
 
 
 def _execute_buy_after_payment(order: CryptoOrder):
-    """Called by admin action after payment is confirmed. Buys on Quidax and credits wallet."""
+    """
+    Called once payment is confirmed (wallet debit, Flutterwave verify, or
+    webhook). Buys on Quidax and credits the crypto wallet. Guarded against
+    double-execution since more than one of those paths can fire for the
+    same order.
+    """
+    if order.status == CryptoOrder.Status.COMPLETED:
+        return
+
     if not getattr(settings, 'QUIDAX_SECRET_KEY', ''):
         logger.info('No Quidax key — buy order %s queued for manual execution', order.reference)
         return
@@ -1186,6 +1240,11 @@ def _execute_buy_after_payment(order: CryptoOrder):
     except QuidaxError as exc:
         logger.error('Quidax buy failed for %s: %s', order.reference, exc)
         _log(order, 'quidax_error', {'error': str(exc)})
+        # Payment was already confirmed (wallet debit or Flutterwave) by the
+        # time this runs — refund the NGN so a Quidax-side failure doesn't
+        # cost the user money for crypto they never received.
+        _credit_ngn_wallet(order.user, order.total_ngn)
+        _log(order, 'refunded_after_failure', {'amount': str(order.total_ngn)})
         order.status = CryptoOrder.Status.FAILED
         order.save(update_fields=['status', 'updated_at'])
 
@@ -1205,17 +1264,38 @@ def _credit_ngn_wallet(user, amount: Decimal):
 # ── Response serialisers ──────────────────────────────────────────────────────
 
 def _buy_response(order: CryptoOrder) -> dict:
-    return {
+    needs_payment = (
+        order.status == CryptoOrder.Status.PENDING_PAYMENT
+        and bool(getattr(settings, 'FLUTTERWAVE_PUBLIC_KEY', ''))
+    )
+    resp = {
         'reference': order.reference,
         'coin': order.coin,
         'coin_amount': str(order.coin_amount),
         'rate_ngn': str(order.rate_ngn),
         'fee_ngn': str(order.fee_ngn),
         'total_ngn': str(order.total_ngn),
-        'payment_url': order.flw_payment_url or None,
-        'bank_details': _AXIRA_BANK if not order.flw_payment_url else None,
         'status': order.status,
+        'needs_payment': needs_payment,
+        'flutterwave': None,
+        'bank_details': None,
     }
+    if needs_payment:
+        user = order.user
+        resp['flutterwave'] = {
+            'public_key': settings.FLUTTERWAVE_PUBLIC_KEY,
+            'tx_ref': order.reference,
+            'amount': str(order.total_ngn),
+            'customer': {
+                'email': user.email,
+                'phone': getattr(user, 'phone', ''),
+                'name': getattr(user, 'full_name', ''),
+            },
+        }
+    elif order.status == CryptoOrder.Status.PENDING_PAYMENT:
+        # Flutterwave isn't configured at all — manual bank-transfer fallback.
+        resp['bank_details'] = _AXIRA_BANK
+    return resp
 
 
 def _sell_response(order: CryptoOrder, deposit_address: str = '') -> dict:
