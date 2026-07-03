@@ -96,7 +96,7 @@ def get_all_tickers() -> dict:
 
 def get_ticker(market: str) -> dict:
     """Returns ticker data for one market."""
-    return _call('GET', f'/markets/{market}/tickers')
+    return _call('GET', f'/markets/tickers/{market}')
 
 
 # ── Sub-account Management ──────────────────────────────────────────────────
