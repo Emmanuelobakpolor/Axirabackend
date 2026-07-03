@@ -28,7 +28,6 @@ from .quidax import (
     create_instant_order,
     get_all_tickers,
     get_deposit_address,
-    get_ticker,
 )
 
 logger = logging.getLogger(__name__)
@@ -359,29 +358,21 @@ def _parse_decimal(value, field_name: str) -> Decimal:
 
 def _fetch_live_rate(coin: str) -> Decimal:
     """
-    Fetch coin's live NGN rate. Some coins (e.g. BNB) have no direct NGN
-    market on Quidax — only a USDT market — so fall back to converting
-    coin/USDT * USDT/NGN when the direct market returns no price.
+    Fetch coin's live NGN rate via Quidax's bulk tickers endpoint — the same
+    data source and resolution logic (direct NGN market, else coin/USDT *
+    USDT/NGN) already proven correct by the public prices list. Reusing it
+    here avoids relying on the single-market ticker endpoint's response
+    shape, which doesn't match what /markets/{market}/tickers actually
+    returns and was silently producing false "no price" failures.
     """
-    market = SUPPORTED_COINS[coin]
     try:
-        data = get_ticker(market)
-        rate = Decimal(str(data.get('ticker', {}).get('last', '0')))
-        if rate > 0:
-            return rate
-    except (QuidaxError, InvalidOperation):
-        pass
-
-    try:
-        usdt_data = get_ticker(f'{coin.lower()}usdt')
-        usdt_rate = Decimal(str(usdt_data.get('ticker', {}).get('last', '0')))
-        usdtngn_data = get_ticker('usdtngn')
-        usdtngn_rate = Decimal(str(usdtngn_data.get('ticker', {}).get('last', '0')))
-        rate = usdt_rate * usdtngn_rate
-        if rate > 0:
-            return rate
-    except (QuidaxError, InvalidOperation) as exc:
+        tickers = get_all_tickers()
+    except QuidaxError as exc:
         raise ValueError(f'Unable to fetch live price for {coin}.') from exc
+
+    rate = _resolve_price_ngn(coin, tickers)
+    if rate > 0:
+        return rate
 
     raise ValueError(f'Unable to fetch live price for {coin}.')
 
