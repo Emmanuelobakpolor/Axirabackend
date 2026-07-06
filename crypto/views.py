@@ -3,6 +3,7 @@ import hmac
 import json
 import logging
 import re
+import time
 from datetime import timedelta
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
 
@@ -28,10 +29,11 @@ from .models import (
 )
 from .quidax import (
     QuidaxError,
+    create_deposit_address,
     create_instant_order,
     create_withdrawal,
     get_all_tickers,
-    get_deposit_address,
+    list_deposit_addresses,
 )
 
 logger = logging.getLogger(__name__)
@@ -530,23 +532,42 @@ def _get_user_deposit_address(user, coin: str, network: str = '') -> str:
             'Please contact support.'
         )
 
-    try:
-        result = get_deposit_address(
-            uid=user.quidax_user_id,
-            currency=coin,
-            network=network or None,
-        )
-        address = result.get('address', '')
-        if not address:
-            raise ValueError(f'Quidax returned no address for {coin}.')
+    def _match(addresses):
+        for a in addresses:
+            if not a.get('address'):
+                continue
+            if network and (a.get('network') or '').upper() != network.upper():
+                continue
+            return a
+        return None
 
+    try:
+        match = _match(list_deposit_addresses(user.quidax_user_id, coin))
+
+        if not match:
+            # No address yet — trigger generation and briefly poll, since
+            # Quidax creates it asynchronously (wallet.address.generated).
+            create_deposit_address(user.quidax_user_id, coin, network or None)
+            for _ in range(4):
+                time.sleep(1.5)
+                match = _match(list_deposit_addresses(user.quidax_user_id, coin))
+                if match:
+                    break
+
+        if not match:
+            raise ValueError(
+                'Your deposit address is still being generated. '
+                'Please try again in a few seconds.'
+            )
+
+        address = match.get('address', '')
         CryptoDepositAddress.objects.get_or_create(
             user=user,
             coin=coin,
             network=network,
             defaults={
                 'address': address,
-                'quidax_ref': str(result.get('id', '')),
+                'quidax_ref': str(match.get('id', '')),
             },
         )
         return address

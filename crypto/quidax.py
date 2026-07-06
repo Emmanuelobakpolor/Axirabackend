@@ -131,16 +131,22 @@ def get_sub_account(uid: str) -> dict:
 
 # ── Deposit Addresses ───────────────────────────────────────────────────────
 
-def get_deposit_address(uid: str, currency: str, network: str = None) -> dict:
+def list_deposit_addresses(uid: str, currency: str) -> list:
+    """List payment addresses already generated for a currency (may be empty)."""
+    result = _call('GET', f'/users/{uid}/wallets/{currency.lower()}/addresses')
+    if isinstance(result, list):
+        return result
+    return [result] if result else []
+
+
+def create_deposit_address(uid: str, currency: str, network: str = None) -> dict:
     """
-    Get or generate deposit address for a currency.
-    network is optional (required for coins like USDT on multiple networks).
+    Trigger generation of a new payment address for a currency. Quidax creates
+    it asynchronously (delivered via the wallet.address.generated webhook) —
+    callers should re-poll list_deposit_addresses() shortly after calling this.
     """
-    params = {'currency': currency.lower()}
-    if network:
-        params['network'] = network
-    qs = urllib.parse.urlencode(params)
-    return _call('GET', f'/users/{uid}/deposit_address?{qs}')
+    qs = f'?{urllib.parse.urlencode({"network": network})}' if network else ''
+    return _call('POST', f'/users/{uid}/wallets/{currency.lower()}/addresses{qs}')
 
 
 # ── Wallet Balances ─────────────────────────────────────────────────────────
