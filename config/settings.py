@@ -167,6 +167,11 @@ if os.environ.get("CLOUDINARY_CLOUD_NAME"):
     }
     STORAGES["default"]["BACKEND"] = "cloudinary_storage.storage.MediaCloudinaryStorage"
 
+# django-cloudinary-storage's collectstatic override reads this legacy setting
+# directly (settings.STATICFILES_STORAGE) instead of STORAGES — Django itself
+# ignores it, but the attribute must still exist or collectstatic crashes.
+STATICFILES_STORAGE = STORAGES["staticfiles"]["BACKEND"]
+
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 AUTH_USER_MODEL = "accounts.User"
