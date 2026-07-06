@@ -9,7 +9,20 @@ from rest_framework import serializers
 from .email_otp import generate_otp
 from .models import SignupSession, User
 
-PHONE_RE = re.compile(r"^\+[1-9]\d{7,14}$")
+# Dial codes for every country offered in the signup country picker
+# (lib/screens/auth/create_account_screen.dart). Sorted longest-first so a
+# 3-digit code like 254 isn't shadowed by a 1-digit prefix match.
+_DIAL_CODES = sorted(
+    {
+        "234", "233", "254", "27", "20", "255", "256", "250", "221", "225",
+        "237", "260", "263", "251", "232", "231", "44", "1", "49", "33",
+        "39", "34", "31", "971", "966", "91", "86", "55", "61",
+    },
+    key=len,
+    reverse=True,
+)
+
+MAX_SUBSCRIBER_DIGITS = 10
 
 
 def normalize_phone(value):
@@ -19,14 +32,20 @@ def normalize_phone(value):
     if not raw.startswith("+") and digits.startswith("0") and len(digits) == 11:
         digits = "234" + digits[1:]
 
-    phone = f"+{digits}" if not raw.startswith("+") else f"+{digits}"
-
-    if not PHONE_RE.match(phone):
+    dial_code = next((d for d in _DIAL_CODES if digits.startswith(d)), None)
+    if not dial_code:
         raise serializers.ValidationError(
-            "Phone must be in international format, for example +2348123456780."
+            "Phone must start with a valid country code, for example +2348123456780."
         )
 
-    return phone
+    subscriber = digits[len(dial_code):]
+    if not (7 <= len(subscriber) <= MAX_SUBSCRIBER_DIGITS):
+        raise serializers.ValidationError(
+            f"Phone number must be at most {MAX_SUBSCRIBER_DIGITS} digits "
+            "after the country code."
+        )
+
+    return f"+{digits}"
 
 
 class StartSignupSerializer(serializers.Serializer):
