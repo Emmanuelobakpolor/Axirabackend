@@ -145,26 +145,24 @@ USE_TZ = True
 STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 
+# DRF's bundled font-awesome-4.0.3.css references its .eot font with a
+# cache-busting query string / #iefix fragment (e.g. "...eot?#iefix&v=4.0.3").
+# Whitenoise's manifest post-processor doesn't strip that suffix before doing
+# its file lookup, so it errors even though the file exists. Non-strict mode
+# leaves such references unhashed instead of failing collectstatic entirely.
+WHITENOISE_MANIFEST_STRICT = False
+
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
 
 # Cloudinary — all ImageField / FileField uploads go here when configured.
 # Locally (no CLOUDINARY_CLOUD_NAME in .env) falls back to local media storage.
-#
-# staticfiles uses whitenoise's plain compressed storage rather than the
-# "Manifest" (cache-busting hashed filename) variant: the Manifest variant
-# rewrites every CSS url() reference to a hashed filename at collectstatic
-# time, and both Django admin's base.css (icon-debug.svg) and DRF's bundled
-# font-awesome-4.0.3.css (fontawesome-webfont.eot) reference assets in a way
-# that lookup can't resolve, which makes collectstatic hard-fail the entire
-# deploy. Plain compression skips that rewrite pass and just gzips/brotlis
-# files, which is all we need here.
 STORAGES = {
     "default": {
         "BACKEND": "django.core.files.storage.FileSystemStorage",
     },
     "staticfiles": {
-        "BACKEND": "whitenoise.storage.CompressedStaticFilesStorage",
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
     },
 }
 

@@ -1,4 +1,7 @@
 providers = ["python"]
 
+[phases.build]
+cmds = ["python manage.py collectstatic --no-input --clear"]
+
 [start]
-cmd = "python manage.py collectstatic --no-input && python manage.py migrate --no-input && gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --workers 2"
+cmd = "python manage.py migrate --no-input && gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --workers 2"
