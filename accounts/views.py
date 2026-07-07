@@ -14,6 +14,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 
+from wallet.models import Wallet
+
 from .email_otp import generate_otp, send_otp_email
 from .models import PasswordResetSession, SignupSession
 from .serializers import (
@@ -50,6 +52,7 @@ class AuthViewSet(viewsets.ViewSet):
         if self.action in {
             "me", "update_profile", "update_profile_photo",
             "remove_profile_photo", "change_password", "update_email",
+            "delete_account",
         }:
             return [IsAuthenticated()]
 
@@ -460,6 +463,38 @@ class AuthViewSet(viewsets.ViewSet):
                 "user": UserSerializer(request.user, context={"request": request}).data,
             }
         )
+
+    @action(detail=False, methods=["delete"], url_path="delete-account")
+    def delete_account(self, request):
+        password = request.data.get("password", "")
+
+        if not password:
+            return Response(
+                {"error": "password is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not request.user.check_password(password):
+            return Response(
+                {"error": "Password is incorrect."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            if request.user.wallet.ngn_balance != 0:
+                return Response(
+                    {"error": "Please withdraw your wallet balance before deleting your account."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        except Wallet.DoesNotExist:
+            pass
+
+        if request.user.profile_photo:
+            request.user.profile_photo.delete(save=False)
+
+        request.user.delete()
+
+        return Response({"message": "Account deleted successfully."})
 
 
 class CreateAdminView(APIView):

@@ -221,6 +221,18 @@ class AdminUserDetailView(APIView):
         u.save(update_fields=['is_active'])
         return Response({'is_active': u.is_active})
 
+    def delete(self, request, user_id):
+        try:
+            u = User.objects.get(id=user_id, is_staff=False)
+        except User.DoesNotExist:
+            return Response({'error': 'User not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        if u.profile_photo:
+            u.profile_photo.delete(save=False)
+
+        u.delete()
+        return Response({'message': 'User deleted successfully.'})
+
 
 class AdminTransactionsView(APIView):
     permission_classes = [IsAdminUser]
