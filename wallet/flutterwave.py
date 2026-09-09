@@ -1,9 +1,12 @@
 import json
+import logging
 import urllib.error
 import urllib.parse
 import urllib.request
 
 from django.conf import settings
+
+logger = logging.getLogger(__name__)
 
 _FLW_BASE = "https://api.flutterwave.com/v3"
 
@@ -30,10 +33,20 @@ def _call(method, path, payload=None):
         try:
             body = json.loads(e.read())
             msg = body.get("message", "Flutterwave API error")
+            # `errors`/`data.complete_message` carry the actionable detail
+            # (bad bank code, insufficient float, disabled transfers). Losing it
+            # is what makes a failed withdrawal impossible to diagnose later.
+            detail = body.get("data")
+            if isinstance(detail, dict):
+                extra = detail.get("complete_message") or detail.get("error")
+                if extra and extra not in msg:
+                    msg = f"{msg}: {extra}"
         except Exception:
             msg = f"Flutterwave API error (HTTP {e.code})"
+        logger.warning("Flutterwave %s %s failed (HTTP %s): %s", method, path, e.code, msg)
         raise FlutterwaveError(msg)
     except Exception as e:
+        logger.warning("Flutterwave %s %s unreachable: %s", method, path, e)
         raise FlutterwaveError(f"Could not reach Flutterwave: {e}")
 
 
