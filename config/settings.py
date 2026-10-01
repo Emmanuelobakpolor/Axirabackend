@@ -69,19 +69,14 @@ AXIRA_BNB_ADDRESS = os.environ.get("AXIRA_BNB_ADDRESS", "")
 AXIRA_XRP_ADDRESS = os.environ.get("AXIRA_XRP_ADDRESS", "")
 AXIRA_USDC_ADDRESS = os.environ.get("AXIRA_USDC_ADDRESS", "")
 
-# Email — SendGrid SMTP (OTP verification)
-# Locally (no SENDGRID_API_KEY): prints to console via ConsoleEmailBackend.
-# In production: set SENDGRID_API_KEY and DEFAULT_FROM_EMAIL in Railway env vars.
-SENDGRID_API_KEY = os.environ.get("SENDGRID_API_KEY", "")
-DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL", "noreply@axira.com")
+# Email — Resend HTTPS API (OTP verification)
+# Locally (no RESEND_API_KEY): prints to console via ConsoleEmailBackend.
+# In production: set RESEND_API_KEY and DEFAULT_FROM_EMAIL in Railway env vars.
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
+DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL", "Axira <noreply@axira.ng>")
 
-if SENDGRID_API_KEY:
-    EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
-    EMAIL_HOST = "smtp.sendgrid.net"
-    EMAIL_PORT = 587
-    EMAIL_USE_TLS = True
-    EMAIL_HOST_USER = "apikey"
-    EMAIL_HOST_PASSWORD = SENDGRID_API_KEY
+if RESEND_API_KEY:
+    EMAIL_BACKEND = "accounts.email_backends.ResendEmailBackend"
 else:
     EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
 

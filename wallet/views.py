@@ -35,6 +35,28 @@ def _get_or_create_wallet(user):
     return wallet
 
 
+def _is_provider_float_error(message):
+    """True when the failure is our own payout float, not anything the user did.
+
+    Flutterwave says 'Insufficient funds in customer wallet' where 'customer'
+    means the *merchant* (us). Shown verbatim it reads as an accusation about
+    the user's own balance, which they can see is fine — so it must never reach
+    them.
+    """
+    text = str(message or '').lower()
+    return (
+        'insufficient funds' in text
+        or 'insufficient balance' in text
+        or 'disburse failed' in text
+    )
+
+
+USER_FACING_TRANSFER_ERROR = (
+    'We could not process your withdrawal right now. Your money has not left '
+    'your wallet. Please try again shortly.'
+)
+
+
 def _mask_account(account_number):
     """Last 4 digits only — logs must not carry full bank account numbers."""
     acct = str(account_number or '')
@@ -219,11 +241,19 @@ class WalletViewSet(GenericViewSet):
                 with db_transaction.atomic():
                     # Conditional update is the concurrency guard: only the first
                     # delivery flips PENDING→FAILED, so retries cannot refund twice.
+                    # `note` is rendered in the user's transaction history, so
+                    # store a user-safe sentence; the raw provider reason stays
+                    # in the logs above for us.
+                    user_note = (
+                        USER_FACING_TRANSFER_ERROR
+                        if _is_provider_float_error(reason)
+                        else reason
+                    )
                     updated = Transaction.objects.filter(
                         pk=tx.pk, status=Transaction.Status.PENDING,
                     ).update(
                         status=Transaction.Status.FAILED,
-                        note=reason,
+                        note=user_note,
                         updated_at=timezone.now(),
                     )
 
@@ -236,6 +266,12 @@ class WalletViewSet(GenericViewSet):
                             'flw_status=%s reason=%s (wallet refunded)',
                             ref, tx.user_id, tx.amount, transfer_status, reason,
                         )
+                        if _is_provider_float_error(reason):
+                            logger.critical(
+                                'PAYOUT FLOAT EXHAUSTED — withdrawals will keep failing '
+                                'until the Flutterwave NGN balance is topped up. ref=%s',
+                                ref,
+                            )
                     else:
                         logger.warning(
                             'Duplicate/late transfer failure webhook ignored: '
@@ -303,8 +339,13 @@ class WalletViewSet(GenericViewSet):
                 '(wallet refunded)',
                 tx.reference, request.user.pk, d['amount'], e,
             )
+            if _is_provider_float_error(e):
+                logger.critical(
+                    'PAYOUT FLOAT EXHAUSTED — withdrawals will keep failing until the '
+                    'Flutterwave NGN balance is topped up. ref=%s', tx.reference,
+                )
             return Response(
-                {'error': f'Transfer could not be initiated: {e}'},
+                {'error': USER_FACING_TRANSFER_ERROR},
                 status=status.HTTP_502_BAD_GATEWAY,
             )
 

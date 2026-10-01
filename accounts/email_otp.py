@@ -6,22 +6,22 @@ from django.utils.crypto import get_random_string
 
 logger = logging.getLogger(__name__)
 
-# When SENDGRID_API_KEY is not configured, every OTP is this fixed value
+# When RESEND_API_KEY is not configured, every OTP is this fixed value
 # so the app works during development/testing without an email provider.
 _DEV_OTP = "1234"
 
 
 def generate_otp() -> str:
     """Returns a real random 4-digit OTP in production, or _DEV_OTP in dev."""
-    if not settings.SENDGRID_API_KEY:
+    if not settings.RESEND_API_KEY:
         return _DEV_OTP
     return get_random_string(4, allowed_chars="0123456789")
 
 
 def send_otp_email(email: str, otp: str) -> bool:
     """
-    Send a one-time password via email (SendGrid in production,
-    console output locally when SENDGRID_API_KEY is not set).
+    Send a one-time password via email (Resend in production,
+    console output locally when RESEND_API_KEY is not set).
     Returns True on success, False on failure.
     """
     subject = "Your Axira Verification Code"
