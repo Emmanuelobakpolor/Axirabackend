@@ -1260,11 +1260,50 @@ class CryptoOrdersView(APIView):
         return Response({'orders': [_order_dict(o) for o in orders]})
 
 
+def _quidax_signature_valid(secret, sig_header, raw_body):
+    """
+    Verify Quidax's `t=<ts>,s=<sig>` header (docs.quidax.io/docs/introduction).
+
+    Quidax computes HMAC-SHA256 over f"{ts}.{JSON.stringify(body)}". The raw
+    body is normally byte-identical to that, but we also try a compact
+    re-serialization in case whitespace differs in transit.
+    """
+    try:
+        ts_part, sig_part = sig_header.split(',', 1)
+        timestamp = ts_part.split('=', 1)[1].strip()
+        signature = sig_part.split('=', 1)[1].strip()
+    except (ValueError, IndexError):
+        return False
+    if not timestamp or not signature:
+        return False
+
+    candidates = [raw_body]
+    try:
+        compact = json.dumps(
+            json.loads(raw_body), separators=(',', ':'), ensure_ascii=False,
+        ).encode()
+        if compact != raw_body:
+            candidates.append(compact)
+    except (ValueError, UnicodeDecodeError):
+        pass
+
+    for body in candidates:
+        expected = hmac.new(
+            secret.encode(),
+            timestamp.encode() + b'.' + body,
+            hashlib.sha256,
+        ).hexdigest()
+        if hmac.compare_digest(signature.lower(), expected):
+            return True
+    return False
+
+
 class CryptoWebhookView(APIView):
     """
     Receives Quidax webhook events.
 
-    Quidax sends a HMAC-SHA512 signature in the X-Quidax-Signature header.
+    Quidax signs each request in the `quidax-signature` header as
+    `t=<timestamp>,s=<hex HMAC-SHA256 of "<timestamp>.<json body>">`.
     Set QUIDAX_WEBHOOK_SECRET in Railway to the secret you configure in the
     Quidax merchant dashboard.
 
@@ -1281,14 +1320,12 @@ class CryptoWebhookView(APIView):
         # ── Signature verification ─────────────────────────────────────────
         secret = getattr(settings, 'QUIDAX_WEBHOOK_SECRET', '')
         if secret:
-            sig_header = request.headers.get('X-Quidax-Signature', '')
-            expected = hmac.new(
-                secret.encode(),
-                request.body,
-                hashlib.sha512,
-            ).hexdigest()
-            if not hmac.compare_digest(sig_header, expected):
-                logger.warning('Quidax webhook signature mismatch')
+            sig_header = request.headers.get('Quidax-Signature', '')
+            if not _quidax_signature_valid(secret, sig_header, request.body):
+                logger.warning(
+                    'Quidax webhook signature mismatch (header present=%s)',
+                    bool(sig_header),
+                )
                 return Response({'error': 'Invalid signature.'}, status=401)
 
         try:
