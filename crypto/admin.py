@@ -1,6 +1,7 @@
 from django.contrib import admin
 
 from .models import (
+    CryptoDeposit,
     CryptoDepositAddress,
     CryptoFeeSettings,
     CryptoOrder,
@@ -33,6 +34,15 @@ class CryptoDepositAddressAdmin(admin.ModelAdmin):
     list_filter = ('coin', 'network')
     search_fields = ('user__email', 'address')
     readonly_fields = ('created_at',)
+
+
+@admin.register(CryptoDeposit)
+class CryptoDepositAdmin(admin.ModelAdmin):
+    list_display = ('user', 'coin', 'network', 'amount', 'quidax_deposit_id', 'tx_id', 'created_at')
+    list_filter = ('coin', 'network')
+    search_fields = ('user__email', 'quidax_deposit_id', 'tx_id')
+    readonly_fields = ('user', 'quidax_deposit_id', 'coin', 'network', 'amount', 'tx_id', 'created_at')
+    ordering = ('-created_at',)
 
 
 @admin.register(CryptoQuote)

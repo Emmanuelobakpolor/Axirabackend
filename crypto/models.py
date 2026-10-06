@@ -85,6 +85,32 @@ class CryptoDepositAddress(models.Model):
         return f"{self.user.email} {self.coin}{net}: {self.address[:20]}..."
 
 
+class CryptoDeposit(models.Model):
+    """
+    One row per Quidax deposit credited to a wallet. The unique
+    quidax_deposit_id is what stops a re-delivered deposit.successful
+    webhook from crediting the same deposit twice.
+    """
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='crypto_deposits',
+    )
+    quidax_deposit_id = models.CharField(max_length=100, unique=True)
+    coin = models.CharField(max_length=20)
+    network = models.CharField(max_length=30, blank=True)
+    amount = models.DecimalField(max_digits=24, decimal_places=8)
+    tx_id = models.CharField(max_length=200, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['user', 'coin'])]
+
+    def __str__(self):
+        return f"{self.user.email} +{self.amount} {self.coin} ({self.quidax_deposit_id})"
+
+
 class CryptoQuote(models.Model):
     """
     A price-locked quote valid for 30 seconds.

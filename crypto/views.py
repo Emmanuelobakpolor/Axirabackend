@@ -8,7 +8,7 @@ from datetime import timedelta
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
 
 from django.conf import settings
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import F
 from django.utils import timezone
 from rest_framework import status
@@ -18,6 +18,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import (
+    CryptoDeposit,
     CryptoDepositAddress,
     CryptoFeeSettings,
     CryptoOrder,
@@ -33,6 +34,7 @@ from .quidax import (
     create_instant_order,
     create_withdrawal,
     get_all_tickers,
+    get_instant_order,
     list_deposit_addresses,
 )
 
@@ -1256,6 +1258,20 @@ class CryptoOrdersView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        # Re-check a few orders Quidax may have settled without the webhook
+        # reaching us. Only reads Quidax state; finalizing is idempotent.
+        if getattr(settings, 'QUIDAX_SECRET_KEY', ''):
+            stuck = CryptoOrder.objects.filter(
+                user=request.user,
+                status=CryptoOrder.Status.PROCESSING,
+                updated_at__lt=timezone.now() - timedelta(seconds=30),
+            ).exclude(quidax_order_id='').order_by('-created_at')[:5]
+            for order in stuck:
+                try:
+                    _sync_quidax_order(order)
+                except QuidaxError as exc:
+                    logger.warning('Order sync failed for %s: %s', order.reference, exc)
+
         orders = CryptoOrder.objects.filter(user=request.user).select_related('quote')[:50]
         return Response({'orders': [_order_dict(o) for o in orders]})
 
@@ -1355,6 +1371,7 @@ class CryptoWebhookView(APIView):
         Credit the user's internal CryptoWallet when a deposit is confirmed.
 
         data fields from Quidax:
+          id        — the deposit's id (dedupe key for re-delivered webhooks)
           user_id   — the Quidax sub-account UID (maps to accounts.User.quidax_user_id)
           amount    — deposit amount as string
           currency  — e.g. 'btc'
@@ -1386,11 +1403,44 @@ class CryptoWebhookView(APIView):
             logger.warning('Deposit webhook: no user with quidax_user_id=%s', quidax_uid)
             return
 
-        _credit_wallet(user, currency, amount)
+        # Quidax re-delivers webhooks it thinks failed, so each deposit must
+        # be credited at most once. Without its id there's no way to tell a
+        # retry from a new deposit — leave those for an admin to credit.
+        deposit_id = str(data.get('id', '')).strip()
+        tx_id = str(data.get('txid') or data.get('tx_id') or '').strip()
+        if not deposit_id:
+            logger.error(
+                'Deposit webhook without id — NOT credited, credit manually: '
+                '%s %s → %s (txid=%s)', amount, currency, user.email, tx_id,
+            )
+            return
+
+        try:
+            with transaction.atomic():
+                CryptoDeposit.objects.create(
+                    user=user,
+                    quidax_deposit_id=deposit_id,
+                    coin=currency,
+                    network=network,
+                    amount=amount,
+                    tx_id=tx_id,
+                )
+                _credit_wallet(user, currency, amount)
+        except IntegrityError:
+            logger.info('Deposit %s already credited — duplicate webhook ignored', deposit_id)
+            return
+
         logger.info(
             'Deposit credited: %s %s → %s (network=%s)',
             amount, currency, user.email, network,
         )
+
+        # The credit above is already committed — never let a failure here
+        # bubble up as a 500, or Quidax retries the webhook and credits twice.
+        try:
+            _fulfil_waiting_sells(user, currency)
+        except Exception:
+            logger.exception('Failed to fulfil waiting sells for %s %s', user.email, currency)
 
     def _handle_order_done(self, data: dict):
         """Finalize Axira orders once Quidax confirms execution."""
@@ -1496,6 +1546,109 @@ def _finalize_quidax_order(order: CryptoOrder):
         order.save(update_fields=['status', 'updated_at'])
 
 
+_QUIDAX_DONE_STATES = ('done', 'completed', 'filled', 'success')
+
+# How long a sell placed before the user had the coin waits for their deposit.
+WAITING_DEPOSIT_TTL = timedelta(hours=24)
+
+
+def _quidax_order_state(result: dict) -> str:
+    return str(result.get('status') or result.get('state') or '').lower()
+
+
+def _sync_quidax_order(order: CryptoOrder) -> None:
+    """
+    Pull the order's current state from Quidax — the fallback for when the
+    order.done webhook never arrives, which otherwise leaves the order (and
+    the user's reserved balance) stuck in PROCESSING forever.
+    """
+    if order.status != CryptoOrder.Status.PROCESSING or not order.quidax_order_id:
+        return
+
+    result = get_instant_order(order.quidax_order_id)
+    state = _quidax_order_state(result)
+
+    if state in _QUIDAX_DONE_STATES:
+        _finalize_quidax_order(order)
+        return
+
+    if state in ('cancel', 'cancelled', 'rejected') and order.order_type == CryptoOrder.OrderType.SELL:
+        executed = result.get('executed_volume') or {}
+        executed = executed.get('amount', '0') if isinstance(executed, dict) else executed
+        try:
+            nothing_sold = Decimal(str(executed or '0')) == 0
+        except InvalidOperation:
+            nothing_sold = False
+        # Partial fills are left for an admin — only auto-unwind clean misses.
+        if nothing_sold:
+            with transaction.atomic():
+                locked = CryptoOrder.objects.select_for_update().get(pk=order.pk)
+                if locked.status != CryptoOrder.Status.PROCESSING:
+                    return
+                _release_reserved(locked.user, locked.coin, locked.coin_amount)
+                locked.status = CryptoOrder.Status.FAILED
+                locked.save(update_fields=['status', 'updated_at'])
+            _log(order, 'quidax_order_cancelled', {'state': state})
+
+
+def _fulfil_waiting_sells(user, coin: str, max_age: timedelta = WAITING_DEPOSIT_TTL) -> None:
+    """
+    A sell placed before the user held the coin is saved as WAITING_DEPOSIT
+    and the user is told to send crypto to their deposit address. When that
+    deposit lands, execute the newest waiting order the balance now covers.
+
+    The order is re-priced at the live rate first: its quote was only valid
+    for seconds and the deposit can take much longer to confirm. Waiting
+    orders older than max_age are expired so they stop showing as in-progress
+    — any coin that arrives later just stays in the wallet to sell manually.
+    """
+    waiting = CryptoOrder.objects.filter(
+        user=user, coin=coin,
+        order_type=CryptoOrder.OrderType.SELL,
+        status=CryptoOrder.Status.WAITING_DEPOSIT,
+    )
+    cutoff = timezone.now() - max_age
+
+    for order in waiting.filter(created_at__gte=cutoff).order_by('-created_at'):
+        if not _reserve_balance(user, coin, order.coin_amount):
+            continue
+
+        try:
+            rate_ngn = _fetch_live_rate(coin)
+        except ValueError:
+            _release_reserved(user, coin, order.coin_amount)
+            logger.warning('Waiting sell %s: no live rate, left waiting', order.reference)
+            return
+
+        ngn_value = (order.coin_amount * rate_ngn).quantize(Decimal('0.01'))
+        fee_ngn = _compute_fee(_get_or_create_fee('sell'), ngn_value)
+        old_payout = order.total_ngn
+
+        order.rate_ngn = rate_ngn
+        order.fee_ngn = fee_ngn
+        order.total_ngn = max(ngn_value - fee_ngn, Decimal('0'))
+        # Out of WAITING_DEPOSIT before executing, so a later deposit can't
+        # reserve this order a second time if execution is queued for admin.
+        order.status = CryptoOrder.Status.DEPOSIT_CONFIRMED
+        order.save(update_fields=['rate_ngn', 'fee_ngn', 'total_ngn', 'status', 'updated_at'])
+        _log(order, 'deposit_matched', {
+            'coin_amount': str(order.coin_amount),
+            'quoted_payout_ngn': str(old_payout),
+            'repriced_payout_ngn': str(order.total_ngn),
+        })
+
+        _execute_sell(order, order.coin_amount)
+        break
+
+    expired = waiting.filter(created_at__lt=cutoff).update(
+        status=CryptoOrder.Status.EXPIRED,
+        note='No deposit received in time.',
+        updated_at=timezone.now(),
+    )
+    if expired:
+        logger.info('Expired %d waiting %s sell(s) for %s', expired, coin, user.email)
+
+
 def _execute_sell(order: CryptoOrder, coin_amount: Decimal):
     """
     Call Quidax to sell the user's crypto on the business account.
@@ -1518,13 +1671,13 @@ def _execute_sell(order: CryptoOrder, coin_amount: Decimal):
             volume=str(coin_amount),
         )
         quidax_id = str(result.get('id', ''))
-        quidax_status = str(result.get('status', '')).lower()
+        quidax_status = _quidax_order_state(result)
 
         order.quidax_order_id = quidax_id
 
         order.save(update_fields=['quidax_order_id', 'updated_at'])
 
-        if quidax_status in ('done', 'completed', 'filled', 'success'):
+        if quidax_status in _QUIDAX_DONE_STATES:
             _finalize_quidax_order(order)
         else:
             order.status = CryptoOrder.Status.PROCESSING
@@ -1654,13 +1807,13 @@ def _execute_buy_after_payment(order: CryptoOrder, refund_on_failure: bool = Tru
             volume=ngn_volume,
         )
         quidax_id = str(result.get('id', ''))
-        quidax_status = str(result.get('status', '')).lower()
+        quidax_status = _quidax_order_state(result)
 
         order.quidax_order_id = quidax_id
 
         order.save(update_fields=['quidax_order_id', 'updated_at'])
 
-        if quidax_status in ('done', 'completed', 'filled', 'success'):
+        if quidax_status in _QUIDAX_DONE_STATES:
             _finalize_quidax_order(order)
         else:
             order.status = CryptoOrder.Status.PROCESSING
