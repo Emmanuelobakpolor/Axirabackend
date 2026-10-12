@@ -1,4 +1,5 @@
 from django.contrib import admin
+from django.db import transaction
 
 from .models import (
     CryptoDeposit,
@@ -166,29 +167,57 @@ class CryptoWithdrawalAdmin(admin.ModelAdmin):
 
     actions = ['mark_completed', 'mark_rejected_and_refund']
 
+    # A PROCESSING withdrawal with no quidax_withdrawal_id never got Quidax's
+    # acceptance (e.g. the request died mid-call), so its amount is still in
+    # the wallet's reserved balance rather than already deducted. Both actions
+    # below settle from reserved in that case instead of from thin air.
+
     @admin.action(description='Mark selected as completed (use only if confirmed on Quidax dashboard)')
     def mark_completed(self, request, queryset):
-        from .views import _wlog
+        from .views import _deduct_reserved, _wlog
 
         updated = 0
-        for w in queryset.exclude(status=CryptoWithdrawal.Status.COMPLETED):
-            w.status = CryptoWithdrawal.Status.COMPLETED
-            w.save(update_fields=['status', 'updated_at'])
-            _wlog(w, 'withdrawal_completed_by_admin', {'admin': request.user.email})
+        for pk in queryset.exclude(status=CryptoWithdrawal.Status.COMPLETED).values_list('pk', flat=True):
+            with transaction.atomic():
+                w = CryptoWithdrawal.objects.select_for_update().get(pk=pk)
+                if w.status == CryptoWithdrawal.Status.COMPLETED:
+                    continue
+                still_reserved = w.status == CryptoWithdrawal.Status.PROCESSING and not w.quidax_withdrawal_id
+                if still_reserved:
+                    _deduct_reserved(w.user, w.coin, w.amount)
+                w.status = CryptoWithdrawal.Status.COMPLETED
+                w.save(update_fields=['status', 'updated_at'])
+                _wlog(w, 'withdrawal_completed_by_admin', {
+                    'admin': request.user.email, 'deducted_reserved': still_reserved,
+                })
             updated += 1
         self.message_user(request, f'{updated} withdrawal(s) marked completed.')
 
     @admin.action(description='Mark selected as rejected and refund wallet')
     def mark_rejected_and_refund(self, request, queryset):
-        from .views import _credit_wallet, _wlog
+        from .views import _credit_wallet, _release_reserved, _wlog
 
         updated = 0
-        for w in queryset.exclude(
+        for pk in queryset.exclude(
             status__in=(CryptoWithdrawal.Status.COMPLETED, CryptoWithdrawal.Status.REJECTED),
-        ):
-            w.status = CryptoWithdrawal.Status.REJECTED
-            w.save(update_fields=['status', 'updated_at'])
-            _credit_wallet(w.user, w.coin, w.amount)
-            _wlog(w, 'withdrawal_rejected_refunded_by_admin', {'admin': request.user.email})
+        ).values_list('pk', flat=True):
+            with transaction.atomic():
+                w = CryptoWithdrawal.objects.select_for_update().get(pk=pk)
+                if w.status in (CryptoWithdrawal.Status.COMPLETED, CryptoWithdrawal.Status.REJECTED):
+                    continue
+                if w.status == CryptoWithdrawal.Status.FAILED:
+                    # FAILED already released the reserve when it failed.
+                    refund = 'none'
+                elif not w.quidax_withdrawal_id:
+                    _release_reserved(w.user, w.coin, w.amount)
+                    refund = 'released_reserved'
+                else:
+                    _credit_wallet(w.user, w.coin, w.amount)
+                    refund = 'credited_available'
+                w.status = CryptoWithdrawal.Status.REJECTED
+                w.save(update_fields=['status', 'updated_at'])
+                _wlog(w, 'withdrawal_rejected_refunded_by_admin', {
+                    'admin': request.user.email, 'refund': refund,
+                })
             updated += 1
         self.message_user(request, f'{updated} withdrawal(s) marked rejected and refunded.')
