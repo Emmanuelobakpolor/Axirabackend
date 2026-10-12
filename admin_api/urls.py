@@ -3,6 +3,7 @@ from django.urls import path
 from .views import (
     AdminCryptoOrderActionView,
     AdminCryptoOrdersView,
+    AdminCryptoWithdrawalsView,
     AdminFeeDetailView,
     AdminFeesView,
     AdminOverviewView,
@@ -28,4 +29,5 @@ urlpatterns = [
     # Crypto order management
     path('admin/crypto/orders/', AdminCryptoOrdersView.as_view()),
     path('admin/crypto/orders/<str:reference>/', AdminCryptoOrderActionView.as_view()),
+    path('admin/crypto/withdrawals/', AdminCryptoWithdrawalsView.as_view()),
 ]

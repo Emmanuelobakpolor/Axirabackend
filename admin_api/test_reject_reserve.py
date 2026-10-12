@@ -55,3 +55,16 @@ class RejectReleasesReserveTest(TestCase):
         cw = r.json()['crypto_wallets'][0]
         self.assertEqual(cw['holds'][0]['reference'], o.reference)
         self.assertEqual(Decimal(cw['unexplained']), 0)
+
+    def test_crypto_lists(self):
+        from crypto.models import CryptoWithdrawal
+        o = self._order(status='pending_payment', order_type='buy')
+        CryptoWithdrawal.objects.create(user=self.user, coin='BTC', address='bc1qxyz', amount=Decimal('0.0001'))
+        r = self.client.get('/api/admin/crypto/orders/')
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()['stats']['pending'], 1)
+        self.assertEqual(r.json()['orders'][0]['reference'], o.reference)
+        r = self.client.get('/api/admin/crypto/withdrawals/')
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()['withdrawals'][0]['address'], 'bc1qxyz')
+        self.assertEqual(r.json()['stats']['processing'], 1)

@@ -451,10 +451,16 @@ class AdminCryptoOrdersView(APIView):
 
         stats = {
             'total': CryptoOrder.objects.count(),
-            'pending': CryptoOrder.objects.filter(status='pending').count(),
-            'processing': CryptoOrder.objects.filter(status='processing').count(),
-            'completed': CryptoOrder.objects.filter(status='completed').count(),
-            'failed': CryptoOrder.objects.filter(status='failed').count(),
+            # Waiting on the user or on an admin, before reaching Quidax.
+            'pending': CryptoOrder.objects.filter(status__in=[
+                CryptoOrder.Status.PENDING_PAYMENT,
+                CryptoOrder.Status.PAYMENT_RECEIVED,
+                CryptoOrder.Status.WAITING_DEPOSIT,
+                CryptoOrder.Status.DEPOSIT_CONFIRMED,
+            ]).count(),
+            'processing': CryptoOrder.objects.filter(status=CryptoOrder.Status.PROCESSING).count(),
+            'completed': CryptoOrder.objects.filter(status=CryptoOrder.Status.COMPLETED).count(),
+            'failed': CryptoOrder.objects.filter(status=CryptoOrder.Status.FAILED).count(),
         }
 
         data = []
@@ -462,10 +468,56 @@ class AdminCryptoOrdersView(APIView):
             d = _order_dict(o)
             d['user'] = o.user.full_name
             d['email'] = o.user.email
+            d['user_id'] = str(o.user.id)
             d['has_proof'] = bool(o.payment_proof)
+            d['proof_url'] = request.build_absolute_uri(o.payment_proof.url) if o.payment_proof else ''
+            d['quidax_order_id'] = o.quidax_order_id
+            d['note'] = o.note
             data.append(d)
 
         return Response({'stats': stats, 'orders': data})
+
+
+class AdminCryptoWithdrawalsView(APIView):
+    """List crypto sends (withdrawals to external wallets) with summary stats."""
+    permission_classes = [IsAdminUser]
+
+    def get(self, request):
+        w_status = request.query_params.get('status', '').lower()
+
+        qs = CryptoWithdrawal.objects.select_related('user').order_by('-created_at')
+        if w_status:
+            qs = qs.filter(status=w_status)
+
+        stats = {
+            'total': CryptoWithdrawal.objects.count(),
+            'processing': CryptoWithdrawal.objects.filter(status=CryptoWithdrawal.Status.PROCESSING).count(),
+            'completed': CryptoWithdrawal.objects.filter(status=CryptoWithdrawal.Status.COMPLETED).count(),
+            'failed': CryptoWithdrawal.objects.filter(
+                status__in=[CryptoWithdrawal.Status.FAILED, CryptoWithdrawal.Status.REJECTED],
+            ).count(),
+        }
+
+        data = []
+        for w in qs[:100]:
+            data.append({
+                'reference': w.reference,
+                'user': w.user.full_name,
+                'email': w.user.email,
+                'user_id': str(w.user.id),
+                'coin': w.coin,
+                'network': w.network,
+                'address': w.address,
+                'amount': str(w.amount),
+                'fee': str(w.fee),
+                'status': w.status,
+                'tx_id': w.tx_id,
+                'quidax_withdrawal_id': w.quidax_withdrawal_id,
+                'note': w.note,
+                'created_at': w.created_at.isoformat(),
+            })
+
+        return Response({'stats': stats, 'withdrawals': data})
 
 
 class AdminCryptoOrderActionView(APIView):
