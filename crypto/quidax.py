@@ -50,6 +50,12 @@ def _call(method: str, path: str, payload: dict = None, max_retries: int = 3):
     data = json.dumps(payload).encode() if payload is not None else None
     last_err = None
 
+    # Only GETs are safe to retry. A POST that timed out or 5xx'd may still
+    # have been executed by Quidax, so retrying an order/withdrawal risks
+    # sending money twice.
+    if method.upper() != 'GET':
+        max_retries = 1
+
     for attempt in range(max_retries):
         req = urllib.request.Request(url, data=data, headers=_headers(), method=method)
         try:
@@ -68,10 +74,10 @@ def _call(method: str, path: str, payload: dict = None, max_retries: int = 3):
             try:
                 raw = e.read().decode('utf-8')
                 body = json.loads(raw) if raw else {}
-                data = body.get('data') if isinstance(body.get('data'), dict) else {}
+                err_data = body.get('data') if isinstance(body.get('data'), dict) else {}
                 msg = (
                     body.get('message')
-                    or data.get('message')
+                    or err_data.get('message')
                     or (f'HTTP {e.code}' if e.code != 404 else f'Endpoint not found: {path}')
                 )
             except Exception:

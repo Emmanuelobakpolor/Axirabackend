@@ -1,5 +1,6 @@
 from decimal import Decimal, InvalidOperation
 
+from django.db import transaction
 from django.db.models import Count, Q, Sum
 from django.utils import timezone
 from rest_framework import status
@@ -9,15 +10,82 @@ from rest_framework.views import APIView
 
 from accounts.models import User
 from accounts.serializers import UserSerializer, UpdateProfileSerializer
-from crypto.models import CryptoFeeSettings, CryptoOrder
+from crypto.models import CryptoFeeSettings, CryptoOrder, CryptoWallet, CryptoWithdrawal
 from crypto.quidax import QuidaxError, create_instant_order
-from crypto.views import SUPPORTED_COINS, _finalize_quidax_order, _ngn_volume_str, _order_dict
+from crypto.views import (
+    SUPPORTED_COINS,
+    _finalize_quidax_order,
+    _log,
+    _ngn_volume_str,
+    _order_dict,
+    _release_reserved,
+)
 from giftcards.models import GiftCardBuy, GiftCardSale
 from wallet.models import Transaction, Wallet
 
 
 def _fmt(value):
     return str(value) if value is not None else '0.00'
+
+
+def _crypto_wallets_breakdown(user):
+    """
+    Each coin wallet with the open orders/withdrawals currently holding its
+    reserved balance. The wallet only stores a reserved total, so the holds
+    are reconstructed from the statuses that reserve coin without settling:
+      - sell in PROCESSING / DEPOSIT_CONFIRMED (Quidax not done yet, or
+        queued for admin because no Quidax key was set)
+      - swap in PROCESSING
+      - withdrawal in PROCESSING that Quidax never accepted (an accepted one
+        is deducted from reserved immediately)
+    Anything left over is reported as unexplained — reserved coin with no
+    open order behind it, which needs a manual fix.
+    """
+    holds_by_coin = {}
+
+    open_orders = CryptoOrder.objects.filter(user=user).filter(
+        Q(order_type=CryptoOrder.OrderType.SELL,
+          status__in=[CryptoOrder.Status.PROCESSING, CryptoOrder.Status.DEPOSIT_CONFIRMED])
+        | Q(order_type=CryptoOrder.OrderType.SWAP, status=CryptoOrder.Status.PROCESSING)
+    )
+    for o in open_orders:
+        holds_by_coin.setdefault(o.coin, []).append({
+            'kind': o.order_type,
+            'reference': o.reference,
+            'status': o.status,
+            'amount': str(o.coin_amount),
+            'quidax_id': o.quidax_order_id,
+            'created_at': o.created_at.isoformat(),
+        })
+
+    stuck_withdrawals = CryptoWithdrawal.objects.filter(
+        user=user, status=CryptoWithdrawal.Status.PROCESSING, quidax_withdrawal_id='',
+    )
+    for w in stuck_withdrawals:
+        holds_by_coin.setdefault(w.coin, []).append({
+            'kind': 'withdrawal',
+            'reference': w.reference,
+            'status': w.status,
+            'amount': str(w.amount),
+            'quidax_id': '',
+            'created_at': w.created_at.isoformat(),
+        })
+
+    result = []
+    for wallet in CryptoWallet.objects.filter(user=user).order_by('coin'):
+        holds = holds_by_coin.get(wallet.coin, [])
+        if wallet.available == 0 and wallet.reserved == 0 and not holds:
+            continue
+        held = sum((Decimal(h['amount']) for h in holds), Decimal('0'))
+        result.append({
+            'coin': wallet.coin,
+            'available': str(wallet.available),
+            'reserved': str(wallet.reserved),
+            'total': str(wallet.total),
+            'holds': holds,
+            'unexplained': str(wallet.reserved - held),
+        })
+    return result
 
 
 def _wallet_tx_dict(tx):
@@ -208,6 +276,7 @@ class AdminUserDetailView(APIView):
             'created_at': u.created_at.isoformat(),
             'profile_photo': u.profile_photo.url if u.profile_photo else '',
             'transactions': combined[:20],
+            'crypto_wallets': _crypto_wallets_breakdown(u),
         })
 
     def post(self, request, user_id):
@@ -424,11 +493,41 @@ class AdminCryptoOrderActionView(APIView):
         )
 
         if action == 'reject':
-            if order.status not in REJECTABLE:
-                return Response({'error': 'Order cannot be rejected at this stage.'}, status=400)
-            order.status = CryptoOrder.Status.FAILED
-            order.note = note or 'Rejected by admin.'
-            order.save(update_fields=['status', 'note', 'updated_at'])
+            with transaction.atomic():
+                # Lock so a double-click can't release the reserve twice.
+                order = CryptoOrder.objects.select_for_update().get(pk=order.pk)
+                if order.status not in REJECTABLE:
+                    return Response({'error': 'Order cannot be rejected at this stage.'}, status=400)
+
+                # Sells/swaps past WAITING_DEPOSIT have the user's coin moved
+                # into reserved — rejecting must hand it back to available.
+                holds_reserve = (
+                    order.order_type == CryptoOrder.OrderType.SELL
+                    and order.status in (CryptoOrder.Status.PROCESSING, CryptoOrder.Status.DEPOSIT_CONFIRMED)
+                ) or (
+                    order.order_type == CryptoOrder.OrderType.SWAP
+                    and order.status == CryptoOrder.Status.PROCESSING
+                )
+                if holds_reserve and order.quidax_order_id:
+                    # Quidax may already have sold the coin — releasing it
+                    # here would let the user spend it twice.
+                    return Response({
+                        'error': (
+                            f'Order was already sent to Quidax (#{order.quidax_order_id}). '
+                            'Run reconcile_crypto_orders to settle it from Quidax instead of rejecting.'
+                        ),
+                    }, status=400)
+
+                if holds_reserve:
+                    _release_reserved(order.user, order.coin, order.coin_amount)
+
+                order.status = CryptoOrder.Status.FAILED
+                order.note = note or 'Rejected by admin.'
+                order.save(update_fields=['status', 'note', 'updated_at'])
+                _log(order, 'admin_rejected', {
+                    'note': order.note,
+                    'released_reserved': str(order.coin_amount) if holds_reserve else '0',
+                })
             return Response({'status': order.status, 'reference': reference})
 
         if action == 'approve':
