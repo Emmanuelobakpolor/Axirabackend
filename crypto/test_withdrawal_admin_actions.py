@@ -62,3 +62,28 @@ class WithdrawalAdminActionsTest(TestCase):
         w = self._w(status=CryptoWithdrawal.Status.FAILED)
         self.ma.mark_rejected_and_refund(self._req(), CryptoWithdrawal.objects.filter(pk=w.pk))
         self.assertEqual(self._bal(), (Decimal('0.00003'), Decimal('0')))
+
+    def test_dashboard_endpoint_refund(self):
+        from rest_framework.test import APIClient
+        w = self._w()
+        c = APIClient()
+        c.force_authenticate(self.admin_user)
+        r = c.post(f'/api/admin/crypto/withdrawals/{w.reference}/', {'action': 'refund'}, format='json')
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()['status'], 'rejected')
+        self.assertEqual(self._bal(), (Decimal('0.00005001'), Decimal('0')))
+        # second click refused, balance unchanged
+        r = c.post(f'/api/admin/crypto/withdrawals/{w.reference}/', {'action': 'refund'}, format='json')
+        self.assertEqual(r.status_code, 400)
+        r = c.post(f'/api/admin/crypto/withdrawals/{w.reference}/', {'action': 'complete'}, format='json')
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(self._bal(), (Decimal('0.00005001'), Decimal('0')))
+
+    def test_dashboard_endpoint_requires_staff(self):
+        from rest_framework.test import APIClient
+        w = self._w()
+        c = APIClient()
+        c.force_authenticate(self.user)
+        r = c.post(f'/api/admin/crypto/withdrawals/{w.reference}/', {'action': 'refund'}, format='json')
+        self.assertEqual(r.status_code, 403)
+        self.assertEqual(self._bal(), (Decimal('0.00003'), AMT))

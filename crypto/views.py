@@ -509,6 +509,55 @@ def _deduct_reserved(user, coin: str, amount: Decimal) -> None:
     )
 
 
+def admin_settle_withdrawal(pk, action: str, admin_email: str) -> str:
+    """
+    Manually settle a withdrawal whose Quidax webhook never arrived — shared
+    by the Django admin actions and the admin dashboard.
+
+    action: 'complete' (coin confirmed sent on Quidax) or 'refund' (it never
+    left). A PROCESSING withdrawal with no quidax_withdrawal_id never got
+    Quidax's acceptance, so its amount is still in reserved rather than
+    already deducted, and is settled from there. Returns a short outcome
+    string; raises ValueError if the withdrawal can't take that action.
+    """
+    S = CryptoWithdrawal.Status
+    with transaction.atomic():
+        w = CryptoWithdrawal.objects.select_for_update().get(pk=pk)
+        still_reserved = w.status == S.PROCESSING and not w.quidax_withdrawal_id
+
+        if action == 'complete':
+            if w.status == S.COMPLETED:
+                raise ValueError('Withdrawal is already completed.')
+            if w.status != S.PROCESSING:
+                raise ValueError(f'A {w.status} withdrawal has already been refunded — it cannot be completed.')
+            if still_reserved:
+                _deduct_reserved(w.user, w.coin, w.amount)
+            w.status = S.COMPLETED
+            outcome = 'deducted_reserved' if still_reserved else 'already_deducted'
+            event = 'withdrawal_completed_by_admin'
+
+        elif action == 'refund':
+            if w.status in (S.COMPLETED, S.REJECTED):
+                raise ValueError(f'Withdrawal is already {w.status}.')
+            if w.status == S.FAILED:
+                outcome = 'none'  # released when it failed
+            elif still_reserved:
+                _release_reserved(w.user, w.coin, w.amount)
+                outcome = 'released_reserved'
+            else:
+                _credit_wallet(w.user, w.coin, w.amount)
+                outcome = 'credited_available'
+            w.status = S.REJECTED
+            event = 'withdrawal_rejected_refunded_by_admin'
+
+        else:
+            raise ValueError('action must be "complete" or "refund".')
+
+        w.save(update_fields=['status', 'updated_at'])
+        _wlog(w, event, {'admin': admin_email, 'outcome': outcome})
+    return outcome
+
+
 def _idempotency_check(ikey: str, user, order_type: str):
     if not ikey:
         return None

@@ -19,6 +19,7 @@ from crypto.views import (
     _ngn_volume_str,
     _order_dict,
     _release_reserved,
+    admin_settle_withdrawal,
 )
 from giftcards.models import GiftCardBuy, GiftCardSale
 from wallet.models import Transaction, Wallet
@@ -518,6 +519,29 @@ class AdminCryptoWithdrawalsView(APIView):
             })
 
         return Response({'stats': stats, 'withdrawals': data})
+
+
+class AdminCryptoWithdrawalActionView(APIView):
+    """
+    Manually settle a stuck withdrawal.
+    POST { action: 'complete' | 'refund' }
+    """
+    permission_classes = [IsAdminUser]
+
+    def post(self, request, reference):
+        try:
+            w = CryptoWithdrawal.objects.get(reference=reference)
+        except CryptoWithdrawal.DoesNotExist:
+            return Response({'error': 'Withdrawal not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        action = request.data.get('action', '').lower()
+        try:
+            outcome = admin_settle_withdrawal(w.pk, action, request.user.email)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=400)
+
+        w.refresh_from_db()
+        return Response({'status': w.status, 'reference': reference, 'outcome': outcome})
 
 
 class AdminCryptoOrderActionView(APIView):
