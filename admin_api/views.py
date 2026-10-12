@@ -19,7 +19,9 @@ from crypto.views import (
     _ngn_volume_str,
     _order_dict,
     _release_reserved,
+    ADMIN_SETTLE_UNDO_WINDOW,
     admin_settle_withdrawal,
+    withdrawal_undoable,
 )
 from giftcards.models import GiftCardBuy, GiftCardSale
 from wallet.models import Transaction, Wallet
@@ -72,10 +74,27 @@ def _crypto_wallets_breakdown(user):
             'created_at': w.created_at.isoformat(),
         })
 
+    # Sends an admin settled recently, so a mistaken click can be undone here.
+    undoable_by_coin = {}
+    recent = CryptoWithdrawal.objects.filter(
+        user=user,
+        status__in=[CryptoWithdrawal.Status.COMPLETED, CryptoWithdrawal.Status.REJECTED],
+        updated_at__gte=timezone.now() - ADMIN_SETTLE_UNDO_WINDOW,
+    )
+    for w in recent:
+        if withdrawal_undoable(w):
+            undoable_by_coin.setdefault(w.coin, []).append({
+                'reference': w.reference,
+                'status': w.status,
+                'amount': str(w.amount),
+                'updated_at': w.updated_at.isoformat(),
+            })
+
     result = []
     for wallet in CryptoWallet.objects.filter(user=user).order_by('coin'):
         holds = holds_by_coin.get(wallet.coin, [])
-        if wallet.available == 0 and wallet.reserved == 0 and not holds:
+        undoable = undoable_by_coin.get(wallet.coin, [])
+        if wallet.available == 0 and wallet.reserved == 0 and not holds and not undoable:
             continue
         held = sum((Decimal(h['amount']) for h in holds), Decimal('0'))
         result.append({
@@ -85,6 +104,7 @@ def _crypto_wallets_breakdown(user):
             'total': str(wallet.total),
             'holds': holds,
             'unexplained': str(wallet.reserved - held),
+            'undoable_sends': undoable,
         })
     return result
 
@@ -514,6 +534,7 @@ class AdminCryptoWithdrawalsView(APIView):
                 'status': w.status,
                 'tx_id': w.tx_id,
                 'quidax_withdrawal_id': w.quidax_withdrawal_id,
+                'undoable': withdrawal_undoable(w),
                 'note': w.note,
                 'created_at': w.created_at.isoformat(),
             })
@@ -524,7 +545,7 @@ class AdminCryptoWithdrawalsView(APIView):
 class AdminCryptoWithdrawalActionView(APIView):
     """
     Manually settle a stuck withdrawal.
-    POST { action: 'complete' | 'refund' }
+    POST { action: 'complete' | 'refund' | 'undo' }
     """
     permission_classes = [IsAdminUser]
 

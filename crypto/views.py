@@ -550,12 +550,77 @@ def admin_settle_withdrawal(pk, action: str, admin_email: str) -> str:
             w.status = S.REJECTED
             event = 'withdrawal_rejected_refunded_by_admin'
 
+        elif action == 'undo':
+            return _undo_admin_settlement(w, admin_email)
+
         else:
-            raise ValueError('action must be "complete" or "refund".')
+            raise ValueError('action must be "complete", "refund" or "undo".')
 
         w.save(update_fields=['status', 'updated_at'])
         _wlog(w, event, {'admin': admin_email, 'outcome': outcome})
     return outcome
+
+
+ADMIN_SETTLE_UNDO_WINDOW = timedelta(hours=24)
+
+
+def withdrawal_undoable(w: CryptoWithdrawal) -> bool:
+    """Whether the dashboard should offer Undo — mirrors _undo_admin_settlement's checks."""
+    if w.status not in (CryptoWithdrawal.Status.COMPLETED, CryptoWithdrawal.Status.REJECTED):
+        return False
+    last = w.logs.order_by('-created_at').first()
+    return bool(
+        last
+        and last.event in ('withdrawal_completed_by_admin', 'withdrawal_rejected_refunded_by_admin')
+        and 'outcome' in (last.detail or {})
+        and timezone.now() - last.created_at <= ADMIN_SETTLE_UNDO_WINDOW
+    )
+
+
+def _undo_admin_settlement(w: CryptoWithdrawal, admin_email: str) -> str:
+    """
+    Reverse the most recent admin_settle_withdrawal on w (caller holds the
+    row lock). Only an admin's own settlement can be undone — never a
+    Quidax webhook result — and only within ADMIN_SETTLE_UNDO_WINDOW, using
+    the outcome recorded in the log so the exact balance move is reversed.
+    """
+    S = CryptoWithdrawal.Status
+    last = w.logs.order_by('-created_at').first()
+    settle_events = ('withdrawal_completed_by_admin', 'withdrawal_rejected_refunded_by_admin')
+    if not last or last.event not in settle_events or 'outcome' not in (last.detail or {}):
+        raise ValueError('Only a send an admin just marked sent or refunded can be undone.')
+    if timezone.now() - last.created_at > ADMIN_SETTLE_UNDO_WINDOW:
+        raise ValueError('Too late to undo — this was settled more than 24 hours ago. Fix it manually.')
+
+    outcome = last.detail['outcome']
+    wallets = CryptoWallet.objects.filter(user=w.user, coin=w.coin)
+
+    if last.event == 'withdrawal_completed_by_admin':
+        if w.status != S.COMPLETED:
+            raise ValueError('Withdrawal is no longer completed.')
+        if outcome == 'deducted_reserved':
+            wallets.update(reserved=F('reserved') + w.amount)
+        restored = S.PROCESSING
+
+    else:
+        if w.status != S.REJECTED:
+            raise ValueError('Withdrawal is no longer rejected.')
+        if outcome in ('released_reserved', 'credited_available'):
+            # The refund may already have been spent — never go negative.
+            moved = wallets.filter(available__gte=w.amount).update(
+                available=F('available') - w.amount,
+                **({'reserved': F('reserved') + w.amount} if outcome == 'released_reserved' else {}),
+            )
+            if not moved:
+                raise ValueError('The user has already spent part of the refund — cannot undo. Fix it manually.')
+        restored = S.FAILED if outcome == 'none' else S.PROCESSING
+
+    w.status = restored
+    w.save(update_fields=['status', 'updated_at'])
+    _wlog(w, 'admin_settlement_undone', {
+        'admin': admin_email, 'undid': last.event, 'outcome': outcome, 'restored_status': restored,
+    })
+    return f'restored_{restored}'
 
 
 def _idempotency_check(ikey: str, user, order_type: str):

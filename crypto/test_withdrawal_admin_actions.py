@@ -87,3 +87,72 @@ class WithdrawalAdminActionsTest(TestCase):
         r = c.post(f'/api/admin/crypto/withdrawals/{w.reference}/', {'action': 'refund'}, format='json')
         self.assertEqual(r.status_code, 403)
         self.assertEqual(self._bal(), (Decimal('0.00003'), AMT))
+
+    # ── Undo ──────────────────────────────────────────────────────────────
+    def _settle(self, w, action):
+        from crypto.views import admin_settle_withdrawal
+        return admin_settle_withdrawal(w.pk, action, 'a@x.com')
+
+    def test_mistaken_mark_sent_undo_then_refund(self):
+        w = self._w()
+        self._settle(w, 'complete')
+        self.assertEqual(self._bal(), (Decimal('0.00003'), Decimal('0')))
+        self._settle(w, 'undo')
+        w.refresh_from_db()
+        self.assertEqual(w.status, 'processing')
+        self.assertEqual(self._bal(), (Decimal('0.00003'), AMT))
+        self._settle(w, 'refund')
+        self.assertEqual(self._bal(), (Decimal('0.00005001'), Decimal('0')))
+
+    def test_undo_refund_restores_reserved(self):
+        w = self._w()
+        self._settle(w, 'refund')
+        self._settle(w, 'undo')
+        w.refresh_from_db()
+        self.assertEqual(w.status, 'processing')
+        self.assertEqual(self._bal(), (Decimal('0.00003'), AMT))
+
+    def test_undo_twice_refused(self):
+        w = self._w()
+        self._settle(w, 'complete')
+        self._settle(w, 'undo')
+        with self.assertRaises(ValueError):
+            self._settle(w, 'undo')
+        self.assertEqual(self._bal(), (Decimal('0.00003'), AMT))
+
+    def test_undo_refund_refused_if_spent(self):
+        w = self._w()
+        self._settle(w, 'refund')
+        CryptoWallet.objects.filter(pk=self.wallet.pk).update(available=Decimal('0.00001'))
+        with self.assertRaises(ValueError):
+            self._settle(w, 'undo')
+        self.assertEqual(self._bal(), (Decimal('0.00001'), Decimal('0')))
+
+    def test_undo_refused_for_webhook_result_and_after_window(self):
+        from datetime import timedelta
+        from django.utils import timezone
+        from crypto.models import CryptoWithdrawalLog
+        from crypto.views import withdrawal_undoable
+        hook = self._w(status=CryptoWithdrawal.Status.COMPLETED, quidax_withdrawal_id='q')
+        self.assertFalse(withdrawal_undoable(hook))
+        with self.assertRaises(ValueError):
+            self._settle(hook, 'undo')
+        w = self._w()
+        self._settle(w, 'complete')
+        w.refresh_from_db()
+        self.assertTrue(withdrawal_undoable(w))
+        CryptoWithdrawalLog.objects.filter(withdrawal=w).update(created_at=timezone.now() - timedelta(hours=25))
+        self.assertFalse(withdrawal_undoable(w))
+        with self.assertRaises(ValueError):
+            self._settle(w, 'undo')
+
+    def test_user_detail_lists_undoable_send(self):
+        from rest_framework.test import APIClient
+        w = self._w()
+        self._settle(w, 'complete')
+        c = APIClient()
+        c.force_authenticate(self.admin_user)
+        cw = c.get(f'/api/admin/users/{self.user.id}/').json()['crypto_wallets'][0]
+        self.assertEqual(cw['undoable_sends'][0]['reference'], w.reference)
+        r = c.post(f'/api/admin/crypto/withdrawals/{w.reference}/', {'action': 'undo'}, format='json')
+        self.assertEqual(r.json()['status'], 'processing')
