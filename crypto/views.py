@@ -295,7 +295,7 @@ def handle_flw_crypto_charge(data: dict):
         return
 
     try:
-        order = CryptoOrder.objects.select_for_update().get(
+        order = CryptoOrder.objects.get(
             reference=tx_ref,
             order_type=CryptoOrder.OrderType.BUY,
             status=CryptoOrder.Status.PENDING_PAYMENT,
@@ -326,16 +326,37 @@ def handle_flw_crypto_charge(data: dict):
         logger.error('FLW verify call failed: %s', exc)
         return
 
-    with transaction.atomic():
-        order.status = CryptoOrder.Status.PAYMENT_RECEIVED
-        order.flw_transaction_id = flw_tx_id
-        order.save(update_fields=['status', 'flw_transaction_id', 'updated_at'])
-        _log(order, 'flw_payment_confirmed', {
-            'flw_tx_id': flw_tx_id,
-            'amount_paid': str(amount_paid),
-        })
+    order = _claim_flw_payment(order, flw_tx_id)
+    if order is None:
+        logger.info('FLW crypto webhook: %s already claimed by another path', tx_ref)
+        return
+    _log(order, 'flw_payment_confirmed', {
+        'flw_tx_id': flw_tx_id,
+        'amount_paid': str(amount_paid),
+    })
 
     _execute_buy_after_payment(order, refund_on_failure=False)
+
+
+def _claim_flw_payment(order: CryptoOrder, flw_tx_id: str):
+    """
+    Atomically move a buy order from PENDING_PAYMENT to PAYMENT_RECEIVED.
+    The webhook and the client verify endpoint can both fire for the same
+    payment; only the caller that wins this conditional UPDATE may execute
+    the Quidax buy. Returns the refreshed order, or None if already claimed.
+    """
+    claimed = CryptoOrder.objects.filter(
+        pk=order.pk,
+        status=CryptoOrder.Status.PENDING_PAYMENT,
+    ).update(
+        status=CryptoOrder.Status.PAYMENT_RECEIVED,
+        flw_transaction_id=flw_tx_id,
+        updated_at=timezone.now(),
+    )
+    if not claimed:
+        return None
+    order.refresh_from_db()
+    return order
 
 _AXIRA_BANK = {
     'bank_name':      getattr(settings, 'AXIRA_BANK_NAME', ''),
@@ -1197,9 +1218,12 @@ class CryptoBuyVerifyView(APIView):
             })
             return Response({'error': 'Payment amount mismatch.'}, status=400)
 
-        order.status = CryptoOrder.Status.PAYMENT_RECEIVED
-        order.flw_transaction_id = str(flw_data.get('id', ''))
-        order.save(update_fields=['status', 'flw_transaction_id', 'updated_at'])
+        claimed = _claim_flw_payment(order, str(flw_data.get('id', '')))
+        if claimed is None:
+            # Webhook (or an earlier verify call) already took this order.
+            order.refresh_from_db()
+            return Response(_buy_response(order))
+        order = claimed
         _log(order, 'flw_payment_confirmed', {'amount': str(flw_amount)})
 
         _execute_buy_after_payment(order, refund_on_failure=False)
