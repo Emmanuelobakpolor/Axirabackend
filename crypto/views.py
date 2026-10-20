@@ -34,6 +34,7 @@ from .quidax import (
     create_instant_order,
     create_withdrawal,
     get_all_tickers,
+    get_default_network,
     get_instant_order,
     list_deposit_addresses,
 )
@@ -1000,6 +1001,20 @@ class CryptoWithdrawView(APIView):
             amount = _parse_decimal(request.data.get('amount'), 'amount')
         except ValueError as exc:
             return Response({'error': str(exc)}, status=400)
+
+        # Quidax rejects withdrawals without a network ("Network is required").
+        # The app only shows a chain picker for multi-chain tokens, so resolve
+        # the coin's default chain here — before reserving any balance.
+        if not network:
+            try:
+                network = get_default_network(coin).upper()
+            except QuidaxError as exc:
+                logger.error('Default network lookup failed for %s: %s', coin, exc)
+            if not network:
+                return Response(
+                    {'error': f'{coin} withdrawals are temporarily unavailable. Please try again later.'},
+                    status=502,
+                )
 
         if not _validate_withdrawal_address(coin, network, address):
             return Response(

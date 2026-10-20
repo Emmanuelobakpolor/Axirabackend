@@ -167,6 +167,23 @@ def get_wallet(uid: str, currency: str) -> dict:
     return _call('GET', f'/users/{uid}/wallets/{currency.lower()}')
 
 
+def get_default_network(currency: str, uid: str = None) -> str:
+    """
+    The wallet's default chain for a coin (e.g. 'btc', 'trc20'), or '' if
+    Quidax doesn't report one. Withdrawals require a network, so single-chain
+    coins (where the app shows no picker) fall back to this.
+    """
+    user_id = uid or getattr(settings, 'QUIDAX_USER_ID', 'me')
+    wallet = get_wallet(user_id, currency) or {}
+    network = wallet.get('default_network') or ''
+    if not network:
+        networks = wallet.get('networks') or []
+        enabled = [n for n in networks if n.get('withdraws_enabled', True)]
+        if len(enabled) == 1:
+            network = enabled[0].get('id') or ''
+    return str(network).lower()
+
+
 # ── Trade Execution ─────────────────────────────────────────────────────────
 
 def _plain_decimal_str(value) -> str:
@@ -224,7 +241,7 @@ def create_withdrawal(
         'fund_uid': address,
     }
     if network:
-        payload['network'] = network
+        payload['network'] = network.lower()
     if reference:
         payload['reference'] = reference
     return _call('POST', f'/users/{user_id}/withdraws', payload)
