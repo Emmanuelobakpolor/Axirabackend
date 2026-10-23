@@ -155,6 +155,20 @@ def create_deposit_address(uid: str, currency: str, network: str = None) -> dict
     return _call('POST', f'/users/{uid}/wallets/{currency.lower()}/addresses{qs}')
 
 
+# ── Deposits ────────────────────────────────────────────────────────────────
+
+def list_deposits(uid: str, currency: str) -> list:
+    """
+    List a sub-account's deposits for one currency (any state). Used to
+    reconcile deposits whose deposit.successful webhook never arrived.
+    """
+    qs = urllib.parse.urlencode({'currency': currency.lower()})
+    result = _call('GET', f'/users/{uid}/deposits?{qs}')
+    if isinstance(result, list):
+        return result
+    return [result] if result else []
+
+
 # ── Wallet Balances ─────────────────────────────────────────────────────────
 
 def get_wallets(uid: str) -> list:

@@ -38,6 +38,7 @@ from .quidax import (
     get_instant_order,
     get_withdrawal,
     list_deposit_addresses,
+    list_deposits,
 )
 
 logger = logging.getLogger(__name__)
@@ -950,6 +951,8 @@ class CryptoWalletView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        # Pick up deposits the webhook missed before reporting balances.
+        _sync_deposits(request.user)
         wallets = CryptoWallet.objects.filter(user=request.user)
         return Response({
             'wallets': [
@@ -1190,6 +1193,159 @@ def _sync_withdrawal(w: CryptoWithdrawal) -> CryptoWithdrawal:
         if tx_id and tx_id != w.tx_id:
             CryptoWithdrawal.objects.filter(pk=w.pk).update(tx_id=tx_id)
     return CryptoWithdrawal.objects.get(pk=w.pk)
+
+
+# ── Deposit crediting (shared by the webhook and Quidax polling) ─────────────
+
+# Quidax states for a deposit that has landed in the sub-account.
+_QUIDAX_DEPOSIT_DONE = {'accepted', 'done', 'successful', 'success', 'completed'}
+_QUIDAX_DEPOSIT_FAILED = {'rejected', 'failed', 'cancelled', 'canceled'}
+
+# Min seconds between Quidax deposit lookups per user, so opening the
+# wallet/history screens repeatedly doesn't hammer the Quidax API.
+_DEPOSIT_SYNC_INTERVAL = 30
+
+
+def _record_deposit(user, data: dict, via: str) -> bool:
+    """
+    Credit one confirmed Quidax deposit to the user's CryptoWallet, at most
+    once (keyed on the Quidax deposit id). Returns True if newly credited.
+    """
+    raw_amount = str(data.get('amount', '0'))
+    currency = str(data.get('currency', '')).upper()
+    network = str(data.get('network', '') or '').upper()
+
+    if currency not in SUPPORTED_COINS:
+        logger.warning('Deposit (%s): unsupported currency=%s for %s', via, currency, user.email)
+        return False
+
+    try:
+        amount = Decimal(raw_amount)
+    except InvalidOperation:
+        logger.warning('Deposit (%s): invalid amount %s', via, raw_amount)
+        return False
+    if amount <= 0:
+        return False
+
+    # Quidax re-delivers webhooks it thinks failed, and polling sees the same
+    # deposits every time, so each deposit must be credited at most once.
+    # Without its id there's no way to tell a repeat from a new deposit —
+    # leave those for an admin to credit.
+    deposit_id = str(data.get('id', '')).strip()
+    tx_id = _quidax_tx_id(data).strip()
+    if not deposit_id:
+        logger.error(
+            'Deposit (%s) without id — NOT credited, credit manually: '
+            '%s %s → %s (txid=%s)', via, amount, currency, user.email, tx_id,
+        )
+        return False
+
+    try:
+        with transaction.atomic():
+            CryptoDeposit.objects.create(
+                user=user,
+                quidax_deposit_id=deposit_id,
+                coin=currency,
+                network=network,
+                amount=amount,
+                tx_id=tx_id,
+            )
+            _credit_wallet(user, currency, amount)
+    except IntegrityError:
+        logger.info('Deposit %s already credited — %s ignored', deposit_id, via)
+        return False
+
+    logger.info(
+        'Deposit credited via %s: %s %s → %s (network=%s)',
+        via, amount, currency, user.email, network,
+    )
+
+    # The credit above is already committed — never let a failure here
+    # bubble up as a 500, or Quidax retries the webhook and credits twice.
+    try:
+        _fulfil_waiting_sells(user, currency)
+    except Exception:
+        logger.exception('Failed to fulfil waiting sells for %s %s', user.email, currency)
+    return True
+
+
+def _sync_deposits(user) -> list:
+    """
+    Pull the user's deposits from Quidax and credit any confirmed ones the
+    webhook missed. Only coins the user has a deposit address for are
+    checked (they can't have received anything else). Returns deposits
+    Quidax has seen but not yet confirmed, e.g. BTC awaiting confirmations.
+    """
+    if not user.quidax_user_id:
+        return []
+
+    from django.core.cache import cache
+    cache_key = f'crypto_deposit_sync:{user.pk}'
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    coins = set(
+        CryptoDepositAddress.objects.filter(user=user).values_list('coin', flat=True)
+    )
+    credited = set(
+        CryptoDeposit.objects.filter(user=user).values_list('quidax_deposit_id', flat=True)
+    )
+    pending = []
+    for coin in coins:
+        try:
+            deposits = list_deposits(user.quidax_user_id, coin)
+        except QuidaxError as exc:
+            logger.warning('Deposit sync failed for %s %s: %s', user.email, coin, exc)
+            continue
+        for d in deposits:
+            if not isinstance(d, dict):
+                continue
+            q_status = str(d.get('status') or d.get('state') or '').strip().lower()
+            if str(d.get('id', '')) in credited or q_status in _QUIDAX_DEPOSIT_FAILED:
+                continue
+            if q_status in _QUIDAX_DEPOSIT_DONE:
+                _record_deposit(user, d, via='deposit_sync')
+            else:
+                pending.append({
+                    'reference': str(d.get('id', '')),
+                    'coin': str(d.get('currency', coin)).upper(),
+                    'network': str(d.get('network', '') or '').upper(),
+                    'amount': str(d.get('amount', '0')),
+                    'status': 'pending',
+                    'tx_id': _quidax_tx_id(d),
+                    'created_at': str(d.get('created_at', '')),
+                })
+
+    cache.set(cache_key, pending, _DEPOSIT_SYNC_INTERVAL)
+    return pending
+
+
+def _deposit_response(d: CryptoDeposit) -> dict:
+    return {
+        'reference': d.quidax_deposit_id,
+        'coin': d.coin,
+        'network': d.network,
+        'amount': str(d.amount),
+        'status': 'completed',
+        'tx_id': d.tx_id,
+        'created_at': d.created_at.isoformat(),
+    }
+
+
+class CryptoDepositsView(APIView):
+    """
+    User's own crypto deposit history. Reconciles with Quidax first, so a
+    deposit shows up (and is credited) even if the webhook never arrived.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        pending = _sync_deposits(request.user)
+        deposits = CryptoDeposit.objects.filter(user=request.user)[:50]
+        return Response({
+            'deposits': pending + [_deposit_response(d) for d in deposits],
+        })
 
 
 class CryptoWithdrawalsView(APIView):
@@ -1646,20 +1802,8 @@ class CryptoWebhookView(APIView):
         User = get_user_model()
 
         quidax_uid = str(data.get('user', {}).get('id', '') or data.get('user_id', ''))
-        raw_amount = str(data.get('amount', '0'))
-        currency = str(data.get('currency', '')).upper()
-        network = str(data.get('network', '')).upper()
-
-        if not quidax_uid or currency not in SUPPORTED_COINS:
-            logger.warning('Deposit webhook: unrecognised uid=%s or currency=%s', quidax_uid, currency)
-            return
-
-        try:
-            amount = Decimal(raw_amount)
-            if amount <= 0:
-                return
-        except InvalidOperation:
-            logger.warning('Deposit webhook: invalid amount %s', raw_amount)
+        if not quidax_uid:
+            logger.warning('Deposit webhook: no user id in payload')
             return
 
         try:
@@ -1668,44 +1812,7 @@ class CryptoWebhookView(APIView):
             logger.warning('Deposit webhook: no user with quidax_user_id=%s', quidax_uid)
             return
 
-        # Quidax re-delivers webhooks it thinks failed, so each deposit must
-        # be credited at most once. Without its id there's no way to tell a
-        # retry from a new deposit — leave those for an admin to credit.
-        deposit_id = str(data.get('id', '')).strip()
-        tx_id = str(data.get('txid') or data.get('tx_id') or '').strip()
-        if not deposit_id:
-            logger.error(
-                'Deposit webhook without id — NOT credited, credit manually: '
-                '%s %s → %s (txid=%s)', amount, currency, user.email, tx_id,
-            )
-            return
-
-        try:
-            with transaction.atomic():
-                CryptoDeposit.objects.create(
-                    user=user,
-                    quidax_deposit_id=deposit_id,
-                    coin=currency,
-                    network=network,
-                    amount=amount,
-                    tx_id=tx_id,
-                )
-                _credit_wallet(user, currency, amount)
-        except IntegrityError:
-            logger.info('Deposit %s already credited — duplicate webhook ignored', deposit_id)
-            return
-
-        logger.info(
-            'Deposit credited: %s %s → %s (network=%s)',
-            amount, currency, user.email, network,
-        )
-
-        # The credit above is already committed — never let a failure here
-        # bubble up as a 500, or Quidax retries the webhook and credits twice.
-        try:
-            _fulfil_waiting_sells(user, currency)
-        except Exception:
-            logger.exception('Failed to fulfil waiting sells for %s %s', user.email, currency)
+        _record_deposit(user, data, via='webhook')
 
     def _handle_order_done(self, data: dict):
         """Finalize Axira orders once Quidax confirms execution."""

@@ -4,6 +4,7 @@ from .views import (
     CryptoBuyOrderView,
     CryptoBuyVerifyView,
     CryptoDepositAddressView,
+    CryptoDepositsView,
     CryptoFeesView,
     CryptoOrdersView,
     CryptoPricesView,
@@ -29,6 +30,7 @@ urlpatterns = [
     # User wallets and addresses
     path('crypto/wallets/', CryptoWalletView.as_view()),
     path('crypto/address/<str:coin>/', CryptoDepositAddressView.as_view()),
+    path('crypto/deposits/', CryptoDepositsView.as_view()),
 
     # Orders
     path('crypto/orders/', CryptoOrdersView.as_view()),
