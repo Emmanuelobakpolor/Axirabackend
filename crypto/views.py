@@ -36,6 +36,7 @@ from .quidax import (
     get_all_tickers,
     get_default_network,
     get_instant_order,
+    get_withdrawal,
     list_deposit_addresses,
 )
 
@@ -794,6 +795,18 @@ def _resolve_price_ngn(coin: str, tickers: dict) -> Decimal:
     return converted if converted > 0 else Decimal('0')
 
 
+def _resolve_price_usd(coin: str, tickers: dict, price_ngn: Decimal, ngn_per_usd: Decimal) -> Decimal:
+    """USD price: the coin/USDT market when one exists, else derived from NGN."""
+    if coin in ('USDT', 'USDC'):
+        return Decimal('1')
+    direct = _ticker_last(tickers, f'{coin.lower()}usdt')
+    if direct > 0:
+        return direct
+    if price_ngn > 0 and ngn_per_usd > 0:
+        return (price_ngn / ngn_per_usd).quantize(Decimal('0.00000001'))
+    return Decimal('0')
+
+
 class CryptoPricesView(APIView):
     """Live prices + coin metadata. Public — no auth required."""
     permission_classes = [AllowAny]
@@ -805,10 +818,15 @@ class CryptoPricesView(APIView):
             logger.error('Quidax ticker fetch failed: %s', exc)
             return Response({'error': str(exc)}, status=502)
 
+        # Live USDT/NGN as the dollar rate; the configured rate is only a fallback.
+        ngn_per_usd = _ticker_last(tickers, 'usdtngn')
+        if ngn_per_usd <= 0:
+            ngn_per_usd = _NGN_PER_USD
+
         coins, prices = [], {}
         for coin in SUPPORTED_COINS:
-            price = str(_resolve_price_ngn(coin, tickers))
-            prices[coin] = price
+            price_ngn = _resolve_price_ngn(coin, tickers)
+            prices[coin] = str(price_ngn)
             meta = COIN_META.get(coin, {})
             coins.append({
                 'symbol': coin,
@@ -816,10 +834,11 @@ class CryptoPricesView(APIView):
                 'color': meta.get('color', '#888888'),
                 'letter': meta.get('letter', coin[0]),
                 'logo_url': _logo_url(coin),
-                'price_ngn': price,
+                'price_ngn': str(price_ngn),
+                'price_usd': str(_resolve_price_usd(coin, tickers, price_ngn, ngn_per_usd)),
             })
 
-        return Response({'prices': prices, 'coins': coins})
+        return Response({'prices': prices, 'coins': coins, 'ngn_per_usd': str(ngn_per_usd)})
 
 
 class CryptoFeesView(APIView):
@@ -1098,13 +1117,106 @@ class CryptoWithdrawView(APIView):
         return Response(_withdrawal_response(withdrawal), status=201)
 
 
+# ── Withdrawal settlement (shared by the webhook and status polling) ─────────
+
+_QUIDAX_WITHDRAW_DONE = {'done', 'successful', 'success', 'completed'}
+_QUIDAX_WITHDRAW_FAILED = {'rejected', 'failed', 'cancelled', 'canceled'}
+
+# Cap on Quidax lookups per history request so a user with many stuck
+# withdrawals can't make the endpoint slow.
+_WITHDRAW_SYNC_MAX = 5
+
+
+def _complete_withdrawal(pk, tx_id: str = '', fee=None, via: str = 'webhook') -> None:
+    with transaction.atomic():
+        w = CryptoWithdrawal.objects.select_for_update().get(pk=pk)
+        if w.status != CryptoWithdrawal.Status.PROCESSING:
+            return
+        w.status = CryptoWithdrawal.Status.COMPLETED
+        if tx_id:
+            w.tx_id = tx_id
+        if fee is not None:
+            try:
+                w.fee = Decimal(str(fee))
+            except InvalidOperation:
+                pass
+        w.save(update_fields=['status', 'tx_id', 'fee', 'updated_at'])
+        _wlog(w, 'withdrawal_completed', {'tx_id': w.tx_id, 'via': via})
+
+
+def _reject_withdrawal(pk, reason: str, via: str = 'webhook') -> None:
+    """
+    Quidax initially accepted the withdrawal (we already deducted the
+    reserved balance as committed) but the transfer ultimately failed —
+    credit the amount back since it never actually left custody.
+    """
+    with transaction.atomic():
+        w = CryptoWithdrawal.objects.select_for_update().get(pk=pk)
+        if w.status != CryptoWithdrawal.Status.PROCESSING:
+            return
+        w.status = CryptoWithdrawal.Status.REJECTED
+        w.note = reason or 'Rejected by Quidax.'
+        w.save(update_fields=['status', 'note', 'updated_at'])
+        _credit_wallet(w.user, w.coin, w.amount)
+        _wlog(w, 'withdrawal_rejected_refunded', {'amount': str(w.amount), 'via': via})
+
+
+def _quidax_tx_id(data: dict) -> str:
+    return str(data.get('txid') or data.get('txId') or data.get('tx_id') or '')
+
+
+def _sync_withdrawal(w: CryptoWithdrawal) -> CryptoWithdrawal:
+    """
+    Ask Quidax for the current state of a PROCESSING withdrawal and settle
+    it locally — the fallback for when the withdraw.* webhook never arrives.
+    """
+    if w.status != CryptoWithdrawal.Status.PROCESSING or not w.quidax_withdrawal_id:
+        return w
+    try:
+        data = get_withdrawal(w.quidax_withdrawal_id)
+    except QuidaxError as exc:
+        logger.warning('Withdrawal status sync failed for %s: %s', w.reference, exc)
+        return w
+
+    q_status = str(data.get('status', '')).strip().lower()
+    if q_status in _QUIDAX_WITHDRAW_DONE:
+        _complete_withdrawal(w.pk, _quidax_tx_id(data), data.get('fee'), via='status_sync')
+    elif q_status in _QUIDAX_WITHDRAW_FAILED:
+        reason = str(data.get('reason') or data.get('message') or f'{q_status.capitalize()} by Quidax.')
+        _reject_withdrawal(w.pk, reason, via='status_sync')
+    else:
+        # Still in flight, but pick up the tx hash once Quidax has broadcast it.
+        tx_id = _quidax_tx_id(data)
+        if tx_id and tx_id != w.tx_id:
+            CryptoWithdrawal.objects.filter(pk=w.pk).update(tx_id=tx_id)
+    return CryptoWithdrawal.objects.get(pk=w.pk)
+
+
 class CryptoWithdrawalsView(APIView):
     """User's own crypto withdrawal history."""
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        withdrawals = CryptoWithdrawal.objects.filter(user=request.user)[:50]
+        withdrawals = list(CryptoWithdrawal.objects.filter(user=request.user)[:50])
+        synced = 0
+        for i, w in enumerate(withdrawals):
+            if synced >= _WITHDRAW_SYNC_MAX:
+                break
+            if w.status == CryptoWithdrawal.Status.PROCESSING and w.quidax_withdrawal_id:
+                withdrawals[i] = _sync_withdrawal(w)
+                synced += 1
         return Response({'withdrawals': [_withdrawal_response(w) for w in withdrawals]})
+
+
+class CryptoWithdrawalDetailView(APIView):
+    """Current status of one withdrawal — polled by the receipt screen."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, reference):
+        w = CryptoWithdrawal.objects.filter(user=request.user, reference=reference).first()
+        if not w:
+            return Response({'error': 'Withdrawal not found.'}, status=404)
+        return Response(_withdrawal_response(_sync_withdrawal(w)))
 
 
 class CryptoBuyOrderView(APIView):
@@ -1628,38 +1740,17 @@ class CryptoWebhookView(APIView):
     def _handle_withdraw_successful(self, data: dict):
         """Mark a withdrawal COMPLETED once Quidax confirms on-chain settlement."""
         withdrawal = self._find_withdrawal(data)
-        if not withdrawal or withdrawal.status == CryptoWithdrawal.Status.COMPLETED:
-            return
-
-        withdrawal.status = CryptoWithdrawal.Status.COMPLETED
-        withdrawal.tx_id = str(data.get('txId') or data.get('tx_id') or '')
-        fee = data.get('fee')
-        if fee is not None:
-            try:
-                withdrawal.fee = Decimal(str(fee))
-            except InvalidOperation:
-                pass
-        withdrawal.save(update_fields=['status', 'tx_id', 'fee', 'updated_at'])
-        _wlog(withdrawal, 'withdrawal_completed', {'tx_id': withdrawal.tx_id})
+        if withdrawal:
+            _complete_withdrawal(withdrawal.pk, _quidax_tx_id(data), data.get('fee'))
 
     def _handle_withdraw_rejected(self, data: dict):
-        """
-        Quidax initially accepted the withdrawal (we already deducted the
-        reserved balance as committed) but the transfer ultimately failed —
-        credit the amount back since it never actually left custody.
-        """
+        """Mark a withdrawal REJECTED and refund the wallet."""
         withdrawal = self._find_withdrawal(data)
-        if not withdrawal or withdrawal.status in (
-            CryptoWithdrawal.Status.COMPLETED, CryptoWithdrawal.Status.REJECTED,
-        ):
-            return
-
-        withdrawal.status = CryptoWithdrawal.Status.REJECTED
-        withdrawal.note = str(data.get('reason') or data.get('message') or 'Rejected by Quidax.')
-        withdrawal.save(update_fields=['status', 'note', 'updated_at'])
-
-        _credit_wallet(withdrawal.user, withdrawal.coin, withdrawal.amount)
-        _wlog(withdrawal, 'withdrawal_rejected_refunded', {'amount': str(withdrawal.amount)})
+        if withdrawal:
+            _reject_withdrawal(
+                withdrawal.pk,
+                str(data.get('reason') or data.get('message') or 'Rejected by Quidax.'),
+            )
 
 
 # ── Execution helpers (called synchronously for now) ─────────────────────────

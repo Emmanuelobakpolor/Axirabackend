@@ -245,3 +245,11 @@ def create_withdrawal(
     if reference:
         payload['reference'] = reference
     return _call('POST', f'/users/{user_id}/withdraws', payload)
+
+def get_withdrawal(withdraw_id: str, uid: str = None) -> dict:
+    """
+    Fetch a single withdrawal's current state from Quidax. Used to reconcile
+    withdrawals still marked PROCESSING when the webhook never arrived.
+    """
+    user_id = uid or getattr(settings, 'QUIDAX_USER_ID', 'me')
+    return _call('GET', f'/users/{user_id}/withdraws/{withdraw_id}')
