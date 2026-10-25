@@ -318,3 +318,38 @@ class CryptoWithdrawalLog(models.Model):
 
     def __str__(self):
         return f"[{self.withdrawal.reference}] {self.event}"
+
+
+class CryptoSweep(models.Model):
+    """
+    An internal (off-chain) Quidax transfer moving a user's coins from their
+    deposit sub-account into Axira's master account, where every sell and
+    withdrawal is executed. Customer balances are tracked in CryptoWallet,
+    not here — a failed sweep never changes what the customer owns, it only
+    leaves the coins in the sub-account until a retry moves them.
+    """
+    class Status(models.TextChoices):
+        SENT = 'sent', 'Sent'        # Quidax accepted the transfer
+        FAILED = 'failed', 'Failed'  # Quidax refused; retried by sweep_quidax_balances
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='crypto_sweeps',
+    )
+    coin = models.CharField(max_length=20)
+    network = models.CharField(max_length=30, blank=True)
+    amount = models.DecimalField(max_digits=24, decimal_places=8)
+    reference = models.CharField(max_length=40, unique=True)
+    quidax_withdrawal_id = models.CharField(max_length=100, blank=True)
+    status = models.CharField(max_length=10, choices=Status.choices)
+    error = models.TextField(blank=True)
+    via = models.CharField(max_length=30, blank=True)  # deposit / command
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['user', 'coin'])]
+
+    def __str__(self):
+        return f"{self.user.email} {self.amount} {self.coin} → master ({self.status})"

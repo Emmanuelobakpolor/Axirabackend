@@ -8,6 +8,7 @@ from .models import (
     CryptoOrder,
     CryptoOrderLog,
     CryptoQuote,
+    CryptoSweep,
     CryptoWallet,
     CryptoWithdrawal,
     CryptoWithdrawalLog,
@@ -188,3 +189,15 @@ class CryptoWithdrawalAdmin(admin.ModelAdmin):
     @admin.action(description='Mark selected as rejected and refund wallet')
     def mark_rejected_and_refund(self, request, queryset):
         self._settle(request, queryset, 'refund', 'marked rejected and refunded')
+
+
+@admin.register(CryptoSweep)
+class CryptoSweepAdmin(admin.ModelAdmin):
+    list_display = ('user', 'coin', 'amount', 'status', 'via', 'reference', 'created_at')
+    list_filter = ('status', 'coin', 'via')
+    search_fields = ('user__email', 'reference', 'quidax_withdrawal_id')
+    readonly_fields = (
+        'user', 'coin', 'network', 'amount', 'reference', 'quidax_withdrawal_id',
+        'status', 'error', 'via', 'created_at',
+    )
+    ordering = ('-created_at',)

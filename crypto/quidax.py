@@ -267,3 +267,22 @@ def get_withdrawal(withdraw_id: str, uid: str = None) -> dict:
     """
     user_id = uid or getattr(settings, 'QUIDAX_USER_ID', 'me')
     return _call('GET', f'/users/{user_id}/withdraws/{withdraw_id}')
+
+
+_master_uid_cache = ''
+
+
+def get_master_uid() -> str:
+    """
+    The master account's own Quidax user id — the fund_uid that makes a
+    sub-account withdrawal an internal, off-chain transfer to the master.
+    QUIDAX_MASTER_UID overrides the lookup if it's ever wrong.
+    """
+    global _master_uid_cache
+    configured = getattr(settings, 'QUIDAX_MASTER_UID', '')
+    if configured:
+        return configured
+    if not _master_uid_cache:
+        data = _call('GET', '/users/me') or {}
+        _master_uid_cache = str(data.get('id') or '')
+    return _master_uid_cache

@@ -6,6 +6,7 @@ from .views import (
     CryptoDepositAddressView,
     CryptoDepositsView,
     CryptoFeesView,
+    CryptoLimitsView,
     CryptoOrdersView,
     CryptoPricesView,
     CryptoQuoteView,
@@ -23,6 +24,7 @@ urlpatterns = [
     # Public-ish data
     path('crypto/prices/', CryptoPricesView.as_view()),
     path('crypto/fees/', CryptoFeesView.as_view()),
+    path('crypto/limits/', CryptoLimitsView.as_view()),
 
     # Quote — must call before placing any order
     path('crypto/quote/', CryptoQuoteView.as_view()),

@@ -51,9 +51,18 @@ RELOADLY_NGN_PER_USD = float(os.environ.get("RELOADLY_NGN_PER_USD", "1700"))
 QUIDAX_SECRET_KEY = os.environ.get("QUIDAX_SECRET_KEY", "")
 QUIDAX_USER_ID = os.environ.get("QUIDAX_USER_ID", "me")  # 'me' = master account
 QUIDAX_WEBHOOK_SECRET = os.environ.get("QUIDAX_WEBHOOK_SECRET", "")
+# Optional: the master account's Quidax user id. Looked up via GET /users/me
+# when unset; deposits are swept from sub-accounts to this account.
+QUIDAX_MASTER_UID = os.environ.get("QUIDAX_MASTER_UID", "")
 
 # NGN/USD rate for converting flat USD fees → NGN
 NGN_PER_USD = float(os.environ.get("NGN_PER_USD", "1600"))
+
+# Quidax's per-coin minimum withdrawal amounts, as a JSON object of coin →
+# amount, e.g. {"BTC": "0.0002", "ETH": "0.005"}. Copy these from the
+# Quidax dashboard; their API doesn't expose them. Coins left out are only
+# held to the ₦1,000 minimum, and Quidax's own rejection still applies.
+CRYPTO_WITHDRAW_MIN_AMOUNTS = os.environ.get("CRYPTO_WITHDRAW_MIN_AMOUNTS", "{}")
 
 # Axira's bank account (displayed to users for buy orders)
 AXIRA_BANK_NAME = os.environ.get("AXIRA_BANK_NAME", "")

@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import time
+import uuid
 from datetime import timedelta
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
 
@@ -27,6 +28,7 @@ from .models import (
     CryptoWallet,
     CryptoWithdrawal,
     CryptoWithdrawalLog,
+    CryptoSweep,
 )
 from .quidax import (
     QuidaxError,
@@ -35,6 +37,8 @@ from .quidax import (
     create_withdrawal,
     get_all_tickers,
     get_default_network,
+    get_master_uid,
+    get_wallet,
     get_instant_order,
     get_withdrawal,
     list_deposit_addresses,
@@ -279,6 +283,73 @@ CRYPTO_WITHDRAW_DAILY_LIMIT_NGN = Decimal(
 )
 
 _NGN_PER_USD = Decimal(str(getattr(settings, 'NGN_PER_USD', '1600')))
+
+
+def _load_withdraw_min_amounts() -> dict:
+    raw = getattr(settings, 'CRYPTO_WITHDRAW_MIN_AMOUNTS', '{}') or '{}'
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else dict(raw)
+        return {str(k).upper(): Decimal(str(v)) for k, v in parsed.items()}
+    except (ValueError, TypeError, InvalidOperation):
+        logger.error('CRYPTO_WITHDRAW_MIN_AMOUNTS is not valid JSON: %r', raw)
+        return {}
+
+
+# Quidax's per-coin minimum withdrawal amounts (see settings.py).
+CRYPTO_WITHDRAW_MIN_AMOUNTS = _load_withdraw_min_amounts()
+
+
+def _fmt_coin(amount: Decimal) -> str:
+    return format(amount.normalize(), 'f')
+
+
+def _friendly_order_error(action: str, coin: str, raw: str) -> str:
+    """
+    Customer-facing text for a failed Quidax buy/sell/swap. As with
+    withdrawals, "insufficient balance" from Quidax is about Axira's
+    account, never the customer's, so it must not be shown as-is.
+    """
+    msg = (raw or '').lower()
+    if 'insufficient' in msg or 'balance' in msg:
+        return (
+            f"We couldn't complete your {coin} {action} right now because of a "
+            'temporary issue on our side. Please try again shortly or contact support.'
+        )
+    if 'minimum' in msg or 'below' in msg:
+        return f'This amount is below the minimum {coin} {action} size. Please enter a higher amount.'
+    return f'Your {coin} {action} could not be completed. Please try again or contact support.'
+
+
+def _order_error_detail(order: 'CryptoOrder', action: str) -> str:
+    last_error = order.logs.filter(event='quidax_error').order_by('-created_at').first()
+    raw = last_error.detail.get('error', '') if last_error else ''
+    return _friendly_order_error(action, order.coin, raw)
+
+
+def _friendly_withdraw_error(coin: str, raw: str) -> str:
+    """
+    Turn a raw Quidax withdrawal error into something a customer can act on.
+    Raw errors describe Axira's Quidax account, not the customer's wallet:
+    "Insufficient account balance" means our account can't cover the
+    transfer, even though the customer's own balance is fine.
+    """
+    msg = (raw or '').lower()
+    if 'insufficient' in msg or 'balance' in msg:
+        return (
+            f'{coin} transfers are temporarily unavailable on our side. '
+            f'Your {coin} balance is safe and has not been touched. '
+            'Please try again later or contact support.'
+        )
+    if 'minimum' in msg:
+        min_amt = CRYPTO_WITHDRAW_MIN_AMOUNTS.get(coin)
+        if min_amt:
+            return f'The minimum {coin} transfer is {_fmt_coin(min_amt)} {coin}. Please enter a higher amount.'
+        return f'This amount is below the minimum {coin} transfer allowed on the network. Please enter a higher amount.'
+    if 'address' in msg:
+        return "The receiving wallet address was rejected. Please check it and try again."
+    if 'network' in msg or 'disabled' in msg or 'suspend' in msg:
+        return f'{coin} transfers on this network are temporarily unavailable. Please try again later.'
+    return 'Transfer failed. Your balance has not been charged. Please try again or contact support.'
 
 def handle_flw_crypto_charge(data: dict):
     """
@@ -854,6 +925,31 @@ class CryptoFeesView(APIView):
         return Response({'fees': fees})
 
 
+class CryptoLimitsView(APIView):
+    """
+    Minimums and the daily transfer cap, so the app can tell customers the
+    limits up front instead of after a rejected order.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        used_today = Decimal('0')
+        try:
+            used_today = _todays_withdrawal_ngn_total(request.user, get_all_tickers())
+        except QuidaxError as exc:
+            logger.warning('Limits: ticker fetch failed, reporting 0 used today: %s', exc)
+        remaining = max(CRYPTO_WITHDRAW_DAILY_LIMIT_NGN - used_today, Decimal('0'))
+        return Response({
+            'min_order_ngn': str(QUIDAX_MIN_NGN_ORDER),
+            'withdraw_min_ngn': str(QUIDAX_MIN_NGN_ORDER),
+            'withdraw_daily_limit_ngn': str(CRYPTO_WITHDRAW_DAILY_LIMIT_NGN),
+            'withdraw_remaining_today_ngn': str(remaining.quantize(Decimal('0.01'))),
+            'withdraw_min_amounts': {
+                coin: _fmt_coin(amt) for coin, amt in CRYPTO_WITHDRAW_MIN_AMOUNTS.items()
+            },
+        })
+
+
 class CryptoQuoteView(APIView):
     """
     Request a price-locked quote valid for 30 seconds.
@@ -1053,17 +1149,28 @@ class CryptoWithdrawView(APIView):
         if rate_ngn <= 0:
             return Response({'error': f'Unable to fetch live price for {coin}.'}, status=502)
 
+        coin_min = CRYPTO_WITHDRAW_MIN_AMOUNTS.get(coin)
+        if coin_min and amount < coin_min:
+            return Response(
+                {'error': f'The minimum {coin} transfer is {_fmt_coin(coin_min)} {coin}. Please enter a higher amount.'},
+                status=400,
+            )
+
         ngn_value = amount * rate_ngn
         if ngn_value < QUIDAX_MIN_NGN_ORDER:
+            min_coin = (QUIDAX_MIN_NGN_ORDER / rate_ngn).quantize(Decimal('0.00000001'))
             return Response(
-                {'error': f'Minimum withdrawal value is ₦{QUIDAX_MIN_NGN_ORDER:,.0f}.'},
+                {'error': f'The minimum transfer is ₦{QUIDAX_MIN_NGN_ORDER:,.0f} '
+                          f'(about {_fmt_coin(min_coin)} {coin}). Please enter a higher amount.'},
                 status=400,
             )
 
         todays_total = _todays_withdrawal_ngn_total(request.user, tickers)
         if todays_total + ngn_value > CRYPTO_WITHDRAW_DAILY_LIMIT_NGN:
+            remaining = max(CRYPTO_WITHDRAW_DAILY_LIMIT_NGN - todays_total, Decimal('0'))
             return Response(
-                {'error': f'This would exceed your daily withdrawal limit of ₦{CRYPTO_WITHDRAW_DAILY_LIMIT_NGN:,.0f}.'},
+                {'error': f'Your daily transfer limit is ₦{CRYPTO_WITHDRAW_DAILY_LIMIT_NGN:,.0f}. '
+                          f'You can send up to ₦{remaining:,.0f} more today.'},
                 status=400,
             )
 
@@ -1112,9 +1219,18 @@ class CryptoWithdrawView(APIView):
             logger.error('Quidax withdrawal failed for %s: %s', withdrawal.reference, error_msg)
             _wlog(withdrawal, 'quidax_error', {'error': error_msg})
 
+            if 'insufficient' in error_msg.lower():
+                # The customer's ledger balance covered this, so Axira's
+                # Quidax account is short — ops needs to top it up.
+                logger.critical(
+                    'Quidax account cannot cover %s %s withdrawal %s — top up the Quidax %s balance.',
+                    amount, coin, withdrawal.reference, coin,
+                )
+
             _release_reserved(request.user, coin, amount)
             withdrawal.status = CryptoWithdrawal.Status.FAILED
-            withdrawal.note = error_msg
+            # The raw Quidax error stays in the withdrawal log above.
+            withdrawal.note = _friendly_withdraw_error(coin, error_msg)
             withdrawal.save(update_fields=['status', 'note', 'updated_at'])
 
         return Response(_withdrawal_response(withdrawal), status=201)
@@ -1262,11 +1378,81 @@ def _record_deposit(user, data: dict, via: str) -> bool:
 
     # The credit above is already committed — never let a failure here
     # bubble up as a 500, or Quidax retries the webhook and credits twice.
+    # Sweep first: waiting sells execute on the master account, so the
+    # coins need to be there before they're sold.
+    try:
+        sweep_to_master(user, currency, network, via='deposit')
+    except Exception:
+        logger.exception('Sweep after deposit failed for %s %s', user.email, currency)
     try:
         _fulfil_waiting_sells(user, currency)
     except Exception:
         logger.exception('Failed to fulfil waiting sells for %s %s', user.email, currency)
     return True
+
+
+def sweep_to_master(user, coin: str, network: str = '', via: str = '') -> CryptoSweep | None:
+    """
+    Move the user's whole available `coin` balance from their Quidax deposit
+    sub-account into the master account, as an internal (off-chain) Quidax
+    transfer. All sells and withdrawals run on the master account, so coins
+    left in a sub-account can't be sold or sent anywhere.
+
+    Moves the live sub-account balance rather than one deposit's amount, so
+    a retry also picks up anything an earlier failed sweep left behind.
+    Never touches CryptoWallet — the customer's ledger balance was already
+    credited when the deposit was recorded. Returns the sweep record, or
+    None if there was nothing to move.
+    """
+    if not getattr(settings, 'QUIDAX_SECRET_KEY', ''):
+        return None
+    sub_uid = str(getattr(user, 'quidax_user_id', '') or '')
+    if not sub_uid:
+        return None
+
+    master_uid = get_master_uid()
+    if not master_uid or master_uid == sub_uid:
+        logger.error('Sweep skipped for %s: master Quidax uid unresolved (%r)', user.email, master_uid)
+        return None
+
+    wallet = get_wallet(sub_uid, coin) or {}
+    try:
+        balance = Decimal(str(wallet.get('balance') or '0'))
+    except InvalidOperation:
+        balance = Decimal('0')
+    if balance <= 0:
+        return None
+
+    network = (network or '').lower() or str(wallet.get('default_network') or '').lower()
+    if not network:
+        network = get_default_network(coin, uid=sub_uid)
+
+    sweep = CryptoSweep(
+        user=user,
+        coin=coin,
+        network=network.upper(),
+        amount=balance,
+        reference=f'SWP{uuid.uuid4().hex[:20].upper()}',
+        via=via,
+    )
+    try:
+        result = create_withdrawal(
+            currency=coin,
+            amount=str(balance),
+            address=master_uid,  # a Quidax user id → internal transfer
+            network=network,
+            reference=sweep.reference,
+            uid=sub_uid,
+        )
+        sweep.quidax_withdrawal_id = str(result.get('id', ''))
+        sweep.status = CryptoSweep.Status.SENT
+        logger.info('Swept %s %s from %s to master (%s)', balance, coin, user.email, sweep.reference)
+    except QuidaxError as exc:
+        sweep.status = CryptoSweep.Status.FAILED
+        sweep.error = str(exc)
+        logger.error('Sweep of %s %s for %s failed: %s', balance, coin, user.email, exc)
+    sweep.save()
+    return sweep
 
 
 def _sync_deposits(user) -> list:
@@ -2236,15 +2422,9 @@ def _buy_response(order: CryptoOrder) -> dict:
         # Flutterwave isn't configured at all — manual bank-transfer fallback.
         resp['bank_details'] = _AXIRA_BANK
     elif order.status == CryptoOrder.Status.FAILED:
-        # Surface the real failure reason (fixes "No message available" in Flutter)
-        last_error = order.logs.filter(event='quidax_error').order_by('-created_at').first()
-        if last_error:
-            resp['error_detail'] = last_error.detail.get('error') or 'Quidax execution failed. Please try again.'
-            # Optional: include raw info for debugging (remove in production if sensitive)
-            if last_error.detail.get('raw_exception'):
-                resp['debug_raw'] = last_error.detail.get('raw_exception')
-        else:
-            resp['error_detail'] = 'Purchase failed. Please try again or contact support.'
+        # Raw Quidax errors describe Axira's account, so map them to
+        # customer-facing text; the raw error stays in the order log.
+        resp['error_detail'] = _order_error_detail(order, 'purchase')
 
         resp['refunded'] = order.logs.filter(event='refunded_after_failure').exists()
         resp['message'] = f"Purchase failed. {resp.get('error_detail', '')}"
@@ -2252,7 +2432,7 @@ def _buy_response(order: CryptoOrder) -> dict:
 
 
 def _sell_response(order: CryptoOrder, deposit_address: str = '') -> dict:
-    return {
+    resp = {
         'reference': order.reference,
         'coin': order.coin,
         'coin_amount': str(order.coin_amount),
@@ -2262,10 +2442,13 @@ def _sell_response(order: CryptoOrder, deposit_address: str = '') -> dict:
         'deposit_address': deposit_address,
         'status': order.status,
     }
+    if order.status == CryptoOrder.Status.FAILED:
+        resp['error_detail'] = _order_error_detail(order, 'sale')
+    return resp
 
 
 def _swap_response(order: CryptoOrder) -> dict:
-    return {
+    resp = {
         'reference': order.reference,
         'from_coin': order.coin,
         'to_coin': order.to_coin,
@@ -2274,3 +2457,6 @@ def _swap_response(order: CryptoOrder) -> dict:
         'fee_ngn': str(order.fee_ngn),
         'status': order.status,
     }
+    if order.status == CryptoOrder.Status.FAILED:
+        resp['error_detail'] = _order_error_detail(order, 'swap')
+    return resp
