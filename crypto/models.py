@@ -274,6 +274,11 @@ class CryptoWithdrawal(models.Model):
     network = models.CharField(max_length=30, blank=True)
     address = models.CharField(max_length=200)
     amount = models.DecimalField(max_digits=20, decimal_places=8)
+    # `amount` is what the customer's balance is charged. `network_fee` is the
+    # part of it kept to cover Quidax's on-chain fee (which Quidax takes from
+    # the master account on top of what we send), so the recipient gets
+    # amount - network_fee. `fee` is what Quidax reported actually charging.
+    network_fee = models.DecimalField(max_digits=20, decimal_places=8, default=Decimal('0'))
     fee = models.DecimalField(max_digits=20, decimal_places=8, default=Decimal('0'))
     quidax_withdrawal_id = models.CharField(max_length=100, blank=True)
     tx_id = models.CharField(max_length=200, blank=True)

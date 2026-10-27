@@ -285,18 +285,72 @@ CRYPTO_WITHDRAW_DAILY_LIMIT_NGN = Decimal(
 _NGN_PER_USD = Decimal(str(getattr(settings, 'NGN_PER_USD', '1600')))
 
 
-def _load_withdraw_min_amounts() -> dict:
-    raw = getattr(settings, 'CRYPTO_WITHDRAW_MIN_AMOUNTS', '{}') or '{}'
+def _load_coin_amounts(setting_name: str) -> dict:
+    raw = getattr(settings, setting_name, '{}') or '{}'
     try:
         parsed = json.loads(raw) if isinstance(raw, str) else dict(raw)
         return {str(k).upper(): Decimal(str(v)) for k, v in parsed.items()}
     except (ValueError, TypeError, InvalidOperation):
-        logger.error('CRYPTO_WITHDRAW_MIN_AMOUNTS is not valid JSON: %r', raw)
+        logger.error('%s is not valid JSON: %r', setting_name, raw)
         return {}
 
 
 # Quidax's per-coin minimum withdrawal amounts (see settings.py).
-CRYPTO_WITHDRAW_MIN_AMOUNTS = _load_withdraw_min_amounts()
+CRYPTO_WITHDRAW_MIN_AMOUNTS = _load_coin_amounts('CRYPTO_WITHDRAW_MIN_AMOUNTS')
+
+# Quidax's per-withdrawal on-chain fee, by coin or "COIN:NETWORK".
+CRYPTO_WITHDRAW_NETWORK_FEES = _load_coin_amounts('CRYPTO_WITHDRAW_NETWORK_FEES')
+
+
+def _withdraw_network_fee(coin: str, network: str) -> Decimal:
+    """
+    The fee to deduct from a customer's withdrawal so Axira doesn't pay
+    Quidax's on-chain fee. Quidax takes that fee from the master account on
+    top of the amount sent, so whatever isn't deducted here comes out of
+    Axira's own funds. Uses the higher of the configured fee and the last
+    fee Quidax actually charged, so a fee increase is picked up
+    automatically once one withdrawal has gone through at the new rate.
+    """
+    coin, network = coin.upper(), (network or '').upper()
+    configured = (
+        CRYPTO_WITHDRAW_NETWORK_FEES.get(f'{coin}:{network}')
+        or CRYPTO_WITHDRAW_NETWORK_FEES.get(coin)
+        or Decimal('0')
+    )
+    last = (
+        CryptoWithdrawal.objects
+        .filter(coin=coin, network=network, fee__gt=0)
+        .order_by('-created_at')
+        .values_list('fee', flat=True)
+        .first()
+    ) or Decimal('0')
+    fee = max(configured, last)
+    if fee <= 0:
+        logger.warning("No network fee known for %s/%s — Axira will pay Quidax's fee.", coin, network)
+    return fee
+
+
+def _network_fee_table() -> dict:
+    """
+    Network fees for the app to preview, keyed "COIN:NETWORK" and "COIN"
+    (the app sends no network for single-chain coins). Display only — the
+    withdraw view works out the exact fee itself via _withdraw_network_fee.
+    """
+    table = dict(CRYPTO_WITHDRAW_NETWORK_FEES)
+    seen = set()
+    for coin, network, fee in (
+        CryptoWithdrawal.objects
+        .filter(fee__gt=0)
+        .order_by('-created_at')
+        .values_list('coin', 'network', 'fee')
+    ):
+        key = f'{coin}:{network}'
+        if key in seen:
+            continue  # only the latest fee per coin/network counts
+        seen.add(key)
+        table[key] = max(table.get(key, Decimal('0')), fee)
+        table[coin] = max(table.get(coin, Decimal('0')), fee)
+    return table
 
 
 def _fmt_coin(amount: Decimal) -> str:
@@ -816,6 +870,8 @@ def _withdrawal_response(w: CryptoWithdrawal) -> dict:
         'network': w.network,
         'address': w.address,
         'amount': str(w.amount),
+        'network_fee': str(w.network_fee),
+        'receive_amount': str(w.amount - w.network_fee),
         'fee': str(w.fee),
         'status': w.status,
         'tx_id': w.tx_id,
@@ -946,6 +1002,9 @@ class CryptoLimitsView(APIView):
             'withdraw_remaining_today_ngn': str(remaining.quantize(Decimal('0.01'))),
             'withdraw_min_amounts': {
                 coin: _fmt_coin(amt) for coin, amt in CRYPTO_WITHDRAW_MIN_AMOUNTS.items()
+            },
+            'withdraw_network_fees': {
+                key: _fmt_coin(fee) for key, fee in _network_fee_table().items()
             },
         })
 
@@ -1149,10 +1208,22 @@ class CryptoWithdrawView(APIView):
         if rate_ngn <= 0:
             return Response({'error': f'Unable to fetch live price for {coin}.'}, status=502)
 
-        coin_min = CRYPTO_WITHDRAW_MIN_AMOUNTS.get(coin)
-        if coin_min and amount < coin_min:
+        # The network fee comes out of the amount: the customer is charged
+        # `amount`, the recipient gets `send_amount`.
+        network_fee = _withdraw_network_fee(coin, network)
+        send_amount = (amount - network_fee).quantize(Decimal('0.00000001'), rounding=ROUND_DOWN)
+        if send_amount <= 0:
             return Response(
-                {'error': f'The minimum {coin} transfer is {_fmt_coin(coin_min)} {coin}. Please enter a higher amount.'},
+                {'error': f'The amount must be more than the {_fmt_coin(network_fee)} {coin} network fee.'},
+                status=400,
+            )
+
+        coin_min = CRYPTO_WITHDRAW_MIN_AMOUNTS.get(coin)
+        if coin_min and send_amount < coin_min:
+            return Response(
+                {'error': f'The minimum {coin} transfer is {_fmt_coin(coin_min + network_fee)} {coin} '
+                          f'({_fmt_coin(coin_min)} {coin} plus the {_fmt_coin(network_fee)} {coin} network fee). '
+                          'Please enter a higher amount.'},
                 status=400,
             )
 
@@ -1183,16 +1254,18 @@ class CryptoWithdrawView(APIView):
             network=network,
             address=address,
             amount=amount,
+            network_fee=network_fee,
             idempotency_key=ikey or None,
         )
         _wlog(withdrawal, 'withdrawal_created', {
             'coin': coin, 'network': network, 'address': address, 'amount': str(amount),
+            'network_fee': str(network_fee), 'send_amount': str(send_amount),
         })
 
         try:
             result = create_withdrawal(
                 currency=coin,
-                amount=str(amount),
+                amount=str(send_amount),
                 address=address,
                 network=network,
                 reference=withdrawal.reference,

@@ -64,6 +64,12 @@ NGN_PER_USD = float(os.environ.get("NGN_PER_USD", "1600"))
 # held to the ₦1,000 minimum, and Quidax's own rejection still applies.
 CRYPTO_WITHDRAW_MIN_AMOUNTS = os.environ.get("CRYPTO_WITHDRAW_MIN_AMOUNTS", "{}")
 
+# The on-chain fee Quidax charges per withdrawal, deducted from what the
+# customer sends so Axira doesn't pay it. JSON of coin (or "COIN:NETWORK")
+# → amount, e.g. {"BTC": "0.0001", "USDT:ERC20": "5", "USDT:TRC20": "1"}.
+# The higher of this and the last fee Quidax actually charged is used.
+CRYPTO_WITHDRAW_NETWORK_FEES = os.environ.get("CRYPTO_WITHDRAW_NETWORK_FEES", "{}")
+
 # Axira's bank account (displayed to users for buy orders)
 AXIRA_BANK_NAME = os.environ.get("AXIRA_BANK_NAME", "")
 AXIRA_ACCOUNT_NUMBER = os.environ.get("AXIRA_ACCOUNT_NUMBER", "")
