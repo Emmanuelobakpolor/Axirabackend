@@ -681,3 +681,37 @@ class AdminCryptoOrderActionView(APIView):
             return Response({'status': order.status, 'reference': reference})
 
         return Response({'error': 'action must be "approve" or "reject".'}, status=400)
+
+
+class AdminCryptoSweepView(APIView):
+    """
+    Run the sweep_quidax_balances command from the dashboard (for when there
+    is no shell on the server).
+    POST { dry_run: true|false, email: '', coin: '' } → { output }
+    """
+    permission_classes = [IsAdminUser]
+
+    def post(self, request):
+        import io
+        import logging
+
+        from django.core.management import call_command
+
+        dry_run = request.data.get('dry_run', True) is not False
+        kwargs = {'dry_run': dry_run}
+        email = str(request.data.get('email') or '').strip()
+        coin = str(request.data.get('coin') or '').strip().upper()
+        if email:
+            kwargs['email'] = email
+        if coin:
+            kwargs['coin'] = coin
+
+        out = io.StringIO()
+        try:
+            call_command('sweep_quidax_balances', stdout=out, stderr=out, **kwargs)
+        except Exception as exc:  # surface the error instead of a bare 500
+            out.write(f'\nSweep crashed: {exc}')
+        output = out.getvalue()
+        logging.getLogger(__name__).info('Admin %s ran sweep (dry_run=%s email=%s coin=%s):\n%s',
+                  request.user.email, dry_run, email or '*', coin or '*', output)
+        return Response({'dry_run': dry_run, 'output': output})
