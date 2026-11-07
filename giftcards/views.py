@@ -90,7 +90,11 @@ class GiftCardViewSet(GenericViewSet):
 
     @action(detail=False, methods=['post'])
     def buy(self, request):
-        serializer = BuyGiftCardSerializer(data=request.data, context={'request': request})
+        if not settings.FEATURE_BUY_GIFTCARD:
+            return Response({'error': 'Buying gift cards is coming soon.'},
+                            status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+        serializer =BuyGiftCardSerializer(data=request.data, context={'request': request})
         serializer.is_valid(raise_exception=True)
         d = serializer.validated_data
 

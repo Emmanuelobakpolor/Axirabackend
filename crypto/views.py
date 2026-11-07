@@ -1651,6 +1651,9 @@ class CryptoBuyOrderView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
+        if not settings.FEATURE_BUY_CRYPTO:
+            return Response({'error': 'Buying crypto is coming soon.'}, status=503)
+
         ikey = str(request.data.get('idempotency_key', '')).strip()
         existing = _idempotency_check(ikey, request.user, CryptoOrder.OrderType.BUY)
         if existing:
@@ -1852,6 +1855,9 @@ class CryptoSwapOrderView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
+        if not settings.FEATURE_SWAP_CRYPTO:
+            return Response({'error': 'Swapping crypto is coming soon.'}, status=503)
+
         ikey = str(request.data.get('idempotency_key', '')).strip()
         existing = _idempotency_check(ikey, request.user, CryptoOrder.OrderType.SWAP)
         if existing:

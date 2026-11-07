@@ -70,6 +70,13 @@ CRYPTO_WITHDRAW_MIN_AMOUNTS = os.environ.get("CRYPTO_WITHDRAW_MIN_AMOUNTS", "{}"
 # The higher of this and the last fee Quidax actually charged is used.
 CRYPTO_WITHDRAW_NETWORK_FEES = os.environ.get("CRYPTO_WITHDRAW_NETWORK_FEES", "{}")
 
+# Services that need Axira's own liquidity (NGN to buy crypto, both legs of
+# a swap, a prefunded Reloadly balance for gift cards) stay off until that
+# liquidity is in place. Set to "true" on Railway to switch one back on.
+FEATURE_BUY_CRYPTO = os.environ.get("FEATURE_BUY_CRYPTO", "false").lower() == "true"
+FEATURE_SWAP_CRYPTO = os.environ.get("FEATURE_SWAP_CRYPTO", "false").lower() == "true"
+FEATURE_BUY_GIFTCARD = os.environ.get("FEATURE_BUY_GIFTCARD", "false").lower() == "true"
+
 # Axira's bank account (displayed to users for buy orders)
 AXIRA_BANK_NAME = os.environ.get("AXIRA_BANK_NAME", "")
 AXIRA_ACCOUNT_NUMBER = os.environ.get("AXIRA_ACCOUNT_NUMBER", "")
