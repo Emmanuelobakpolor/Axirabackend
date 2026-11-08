@@ -78,3 +78,75 @@ class GiftCardSaleImage(models.Model):
 
     def __str__(self):
         return f"Image for {self.sale.reference}"
+
+
+# Countries offered when setting sell rates. Codes are what's stored; names
+# are what the app and admin dashboard show.
+SELL_RATE_COUNTRIES = {
+    'US': 'United States',
+    'CA': 'Canada',
+    'GB': 'United Kingdom',
+    'AU': 'Australia',
+    'NZ': 'New Zealand',
+    'DE': 'Germany',
+    'FR': 'France',
+    'IT': 'Italy',
+    'ES': 'Spain',
+    'NL': 'Netherlands',
+    'IE': 'Ireland',
+    'CH': 'Switzerland',
+}
+
+
+class GiftCardSellRate(models.Model):
+    """
+    What Axira pays, in NGN per $1 of card value, when a customer sells a
+    gift card. Rates vary by brand, country, card type and value band
+    (e.g. Amazon US e-code $100–$500 can pay more than $25–$99), so there
+    is one row per combination. A sale is only accepted if it matches an
+    active row, and it's paid at that row's rate.
+    """
+
+    class CardType(models.TextChoices):
+        PHYSICAL = 'physical', 'Physical Card'
+        ECODE = 'ecode', 'E-Code'
+
+    brand = models.CharField(max_length=100)
+    logo_url = models.CharField(max_length=300, blank=True)
+    country = models.CharField(max_length=2)
+    card_type = models.CharField(max_length=20, choices=CardType.choices)
+    min_usd = models.DecimalField(max_digits=10, decimal_places=2, default=1)
+    max_usd = models.DecimalField(max_digits=10, decimal_places=2, default=1000)
+    rate_ngn = models.DecimalField(max_digits=10, decimal_places=2)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['brand', 'country', 'card_type', 'min_usd']
+
+    @property
+    def country_name(self):
+        return SELL_RATE_COUNTRIES.get(self.country, self.country)
+
+    @classmethod
+    def find(cls, brand, country, card_type, amount_usd):
+        """The active rate for this card, or None if Axira isn't buying it."""
+        return (
+            cls.objects.filter(
+                brand__iexact=brand,
+                country=country,
+                card_type=card_type,
+                is_active=True,
+                min_usd__lte=amount_usd,
+                max_usd__gte=amount_usd,
+            )
+            .order_by('-min_usd')
+            .first()
+        )
+
+    def __str__(self):
+        return (
+            f"{self.brand} {self.country} {self.get_card_type_display()} "
+            f"${self.min_usd}–${self.max_usd} @ ₦{self.rate_ngn}"
+        )

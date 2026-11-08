@@ -3,7 +3,15 @@ from django.db import transaction as db_transaction
 
 from wallet.models import Wallet
 
-from .models import GiftCardBuy, GiftCardSale, GiftCardSaleImage
+from .models import GiftCardBuy, GiftCardSale, GiftCardSaleImage, GiftCardSellRate
+
+
+@admin.register(GiftCardSellRate)
+class GiftCardSellRateAdmin(admin.ModelAdmin):
+    list_display = ['brand', 'country', 'card_type', 'min_usd', 'max_usd', 'rate_ngn', 'is_active', 'updated_at']
+    list_editable = ['rate_ngn', 'is_active']
+    list_filter = ['is_active', 'country', 'card_type']
+    search_fields = ['brand']
 
 
 @admin.register(GiftCardBuy)

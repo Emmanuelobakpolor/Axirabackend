@@ -23,7 +23,8 @@ from crypto.views import (
     admin_settle_withdrawal,
     withdrawal_undoable,
 )
-from giftcards.models import GiftCardBuy, GiftCardSale
+from giftcards.models import SELL_RATE_COUNTRIES, GiftCardBuy, GiftCardSale, GiftCardSellRate
+from giftcards.serializers import GiftCardSellRateSerializer
 from wallet.models import Transaction, Wallet
 
 
@@ -715,3 +716,53 @@ class AdminCryptoSweepView(APIView):
         logging.getLogger(__name__).info('Admin %s ran sweep (dry_run=%s email=%s coin=%s):\n%s',
                   request.user.email, dry_run, email or '*', coin or '*', output)
         return Response({'dry_run': dry_run, 'output': output})
+
+
+# ── Gift card sell rates ──────────────────────────────────────────────────────
+
+class AdminGiftCardSellRatesView(APIView):
+    """List every sell rate (active or not), or add one."""
+    permission_classes = [IsAdminUser]
+
+    def get(self, request):
+        rates = GiftCardSellRate.objects.all()
+        return Response({
+            'rates': GiftCardSellRateSerializer(rates, many=True).data,
+            'countries': [{'code': c, 'name': n} for c, n in SELL_RATE_COUNTRIES.items()],
+            'card_types': [
+                {'value': v, 'label': label} for v, label in GiftCardSellRate.CardType.choices
+            ],
+        })
+
+    def post(self, request):
+        serializer = GiftCardSellRateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+class AdminGiftCardSellRateDetailView(APIView):
+    """Edit or delete one sell rate. Past sales keep the rate they were paid at."""
+    permission_classes = [IsAdminUser]
+
+    def _get(self, rate_id):
+        try:
+            return GiftCardSellRate.objects.get(id=rate_id)
+        except GiftCardSellRate.DoesNotExist:
+            return None
+
+    def patch(self, request, rate_id):
+        rate = self._get(rate_id)
+        if rate is None:
+            return Response({'error': 'Rate not found.'}, status=status.HTTP_404_NOT_FOUND)
+        serializer = GiftCardSellRateSerializer(rate, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
+
+    def delete(self, request, rate_id):
+        rate = self._get(rate_id)
+        if rate is None:
+            return Response({'error': 'Rate not found.'}, status=status.HTTP_404_NOT_FOUND)
+        rate.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)

@@ -10,9 +10,13 @@ from rest_framework.viewsets import GenericViewSet
 
 from wallet.models import Wallet
 
-from .models import GiftCardBuy, GiftCardSale, GiftCardSaleImage
+from .models import GiftCardBuy, GiftCardSale, GiftCardSaleImage, GiftCardSellRate
 from .reloadly import ReloadlyError, get_brands, get_products, order_gift_card
-from .serializers import BuyGiftCardSerializer, SellGiftCardSerializer
+from .serializers import (
+    BuyGiftCardSerializer,
+    GiftCardSellRateSerializer,
+    SellGiftCardSerializer,
+)
 
 
 def _get_or_create_wallet(user):
@@ -158,19 +162,29 @@ class GiftCardViewSet(GenericViewSet):
             'redeem_pin': redeem_pin,
         }, status=status.HTTP_201_CREATED)
 
+    @action(detail=False, methods=['get'], url_path='sell-rates')
+    def sell_rates(self, request):
+        """The cards Axira is currently buying, and what it pays for each."""
+        rates = GiftCardSellRate.objects.filter(is_active=True)
+        return Response({'rates': GiftCardSellRateSerializer(rates, many=True).data})
+
     @action(detail=False, methods=['post'])
     def sell(self, request):
         serializer = SellGiftCardSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         d = serializer.validated_data
 
-        rate = Decimal(str(settings.RELOADLY_NGN_PER_USD))
+        # Paid at the admin-set rate for this exact card, never a rate the
+        # client sends. The buy rate (RELOADLY_NGN_PER_USD) is deliberately
+        # not used here: it's what customers pay us, not what we pay them.
+        sell_rate = d['sell_rate']
+        rate = sell_rate.rate_ngn
         amount_ngn = (d['amount_usd'] * rate).quantize(Decimal('0.01'))
 
         sale = GiftCardSale.objects.create(
             user=request.user,
-            brand=d['brand'],
-            brand_asset=d.get('brand_asset', ''),
+            brand=sell_rate.brand,
+            brand_asset=sell_rate.logo_url or d.get('brand_asset', ''),
             country=d['country'],
             card_type=d['card_type'],
             amount_usd=d['amount_usd'],
