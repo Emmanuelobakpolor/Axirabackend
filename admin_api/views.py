@@ -1,9 +1,16 @@
+import os
+import uuid
 from decimal import Decimal, InvalidOperation
 
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.core.files.storage import default_storage
 from django.db import transaction
 from django.db.models import Count, Q, Sum
 from django.utils import timezone
+from rest_framework import serializers as drf_serializers
 from rest_framework import status
+from rest_framework.exceptions import ValidationError
+from rest_framework.parsers import MultiPartParser
 from rest_framework.permissions import IsAdminUser
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -739,6 +746,40 @@ class AdminGiftCardSellRatesView(APIView):
         serializer.is_valid(raise_exception=True)
         serializer.save()
         return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+class AdminGiftCardLogoUploadView(APIView):
+    """
+    Store a brand logo and return its public URL, which the dashboard then
+    saves as a sell rate's logo_url. Goes to Cloudinary in production.
+    """
+    permission_classes = [IsAdminUser]
+    parser_classes = [MultiPartParser]
+
+    MAX_BYTES = 2 * 1024 * 1024
+    ALLOWED_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.webp'}
+
+    def post(self, request):
+        upload = request.FILES.get('logo')
+        if upload is None:
+            return Response({'error': 'Choose an image to upload.'}, status=400)
+
+        ext = os.path.splitext(upload.name)[1].lower()
+        if ext not in self.ALLOWED_EXTENSIONS:
+            return Response({'error': 'Logo must be a PNG, JPG or WebP image.'}, status=400)
+        if upload.size > self.MAX_BYTES:
+            return Response({'error': 'Logo must be 2 MB or smaller.'}, status=400)
+        try:
+            # Opens it with Pillow, so a renamed non-image is rejected.
+            drf_serializers.ImageField().to_internal_value(upload)
+        except (ValidationError, DjangoValidationError):
+            return Response({'error': "That file isn't a valid image."}, status=400)
+
+        name = default_storage.save(f'giftcard_logos/{uuid.uuid4().hex}{ext}', upload)
+        url = default_storage.url(name)
+        if not url.startswith('http'):
+            url = request.build_absolute_uri(url)
+        return Response({'url': url}, status=status.HTTP_201_CREATED)
 
 
 class AdminGiftCardSellRateDetailView(APIView):

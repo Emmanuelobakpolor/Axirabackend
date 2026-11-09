@@ -8,6 +8,7 @@ from .views import (
     AdminCryptoWithdrawalsView,
     AdminFeeDetailView,
     AdminFeesView,
+    AdminGiftCardLogoUploadView,
     AdminGiftCardSellRateDetailView,
     AdminGiftCardSellRatesView,
     AdminOverviewView,
@@ -33,6 +34,7 @@ urlpatterns = [
     # Gift card sell rates
     path('admin/giftcards/sell-rates/', AdminGiftCardSellRatesView.as_view()),
     path('admin/giftcards/sell-rates/<int:rate_id>/', AdminGiftCardSellRateDetailView.as_view()),
+    path('admin/giftcards/logo/', AdminGiftCardLogoUploadView.as_view()),
 
     # Crypto order management
     path('admin/crypto/orders/', AdminCryptoOrdersView.as_view()),
