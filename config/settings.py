@@ -35,6 +35,7 @@ INSTALLED_APPS = [
     "giftcards",
     "crypto",
     "admin_api",
+    "notifications",
 ]
 
 # ── Third-party API keys (never hardcoded) ────────────────────────────────────

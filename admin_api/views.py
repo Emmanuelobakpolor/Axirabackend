@@ -1,3 +1,4 @@
+import logging
 import os
 import uuid
 from decimal import Decimal, InvalidOperation
@@ -775,7 +776,15 @@ class AdminGiftCardLogoUploadView(APIView):
         except (ValidationError, DjangoValidationError):
             return Response({'error': "That file isn't a valid image."}, status=400)
 
-        name = default_storage.save(f'giftcard_logos/{uuid.uuid4().hex}{ext}', upload)
+        try:
+            name = default_storage.save(f'giftcard_logos/{uuid.uuid4().hex}{ext}', upload)
+        except Exception:
+            logging.getLogger(__name__).exception('Gift card logo upload failed')
+            return Response(
+                {'error': 'Image storage rejected the upload. Check the Cloudinary '
+                          'settings on Railway.'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
         url = default_storage.url(name)
         if not url.startswith('http'):
             url = request.build_absolute_uri(url)

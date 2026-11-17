@@ -1,3 +1,4 @@
+import logging
 from decimal import Decimal
 
 from django.conf import settings
@@ -17,6 +18,9 @@ from .serializers import (
     GiftCardSellRateSerializer,
     SellGiftCardSerializer,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 def _get_or_create_wallet(user):
@@ -181,19 +185,33 @@ class GiftCardViewSet(GenericViewSet):
         rate = sell_rate.rate_ngn
         amount_ngn = (d['amount_usd'] * rate).quantize(Decimal('0.01'))
 
-        sale = GiftCardSale.objects.create(
-            user=request.user,
-            brand=sell_rate.brand,
-            brand_asset=sell_rate.logo_url or d.get('brand_asset', ''),
-            country=d['country'],
-            card_type=d['card_type'],
-            amount_usd=d['amount_usd'],
-            rate_ngn=rate,
-            amount_ngn=amount_ngn,
-        )
+        images = request.FILES.getlist('images')
+        if not images:
+            return Response({'error': 'Add at least one photo of the card.'},
+                            status=status.HTTP_400_BAD_REQUEST)
 
-        for img_file in request.FILES.getlist('images'):
-            GiftCardSaleImage.objects.create(sale=sale, image=img_file)
+        # Sale and photos are saved together: if a photo upload fails, no
+        # photo-less sale is left behind for the customer to duplicate on retry.
+        try:
+            with db_transaction.atomic():
+                sale = GiftCardSale.objects.create(
+                    user=request.user,
+                    brand=sell_rate.brand,
+                    brand_asset=sell_rate.logo_url or d.get('brand_asset', ''),
+                    country=d['country'],
+                    card_type=d['card_type'],
+                    amount_usd=d['amount_usd'],
+                    rate_ngn=rate,
+                    amount_ngn=amount_ngn,
+                )
+                for img_file in images:
+                    GiftCardSaleImage.objects.create(sale=sale, image=img_file)
+        except Exception:
+            logger.exception('Gift card sale photo upload failed for %s', request.user.email)
+            return Response(
+                {'error': "We couldn't upload your card photos. Please try again."},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
 
         return Response({
             'reference': sale.reference,

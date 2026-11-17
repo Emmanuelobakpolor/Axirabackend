@@ -10,6 +10,7 @@ urlpatterns = [
     path("api/", include("giftcards.urls")),
     path("api/", include("crypto.urls")),
     path("api/", include("admin_api.urls")),
+    path("api/", include("notifications.urls")),
 ]
 
 if settings.DEBUG:
