@@ -5,7 +5,8 @@ djangorestframework==3.17.1
 djangorestframework_simplejwt==5.5.1
 pillow==12.2.0
 PyJWT==2.13.0
-sqlparse==0.5.5
+sqlparse==3.0.0
+requests==2.32.3
 tzdata==2026.2
 python-dotenv==1.0.1
 gunicorn==23.0.0
