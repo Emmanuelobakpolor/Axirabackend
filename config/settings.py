@@ -286,4 +286,6 @@ LOGGING = {
     },
 }
 
+FCM_SERVICE_ACCOUNT_JSON = os.environ.get("FCM_SERVICE_ACCOUNT_JSON", "")
+FCM_PROJECT_ID = os.environ.get("FCM_PROJECT_ID", "")
 FCM_SERVER_KEY = os.environ.get("FCM_SERVER_KEY", "")

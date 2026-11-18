@@ -1,4 +1,9 @@
+import base64
 import json
+import time
+
+import jwt
+import requests
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
@@ -89,37 +94,43 @@ class BroadcastNotificationView(APIView):
 
         push_status = 'not_configured'
         if tokens:
-            import requests
-
-            payload = {
-                'registration_ids': tokens,
-                'notification': {
-                    'title': notification.title,
-                    'body': notification.body,
-                },
-                'data': {
-                    'type': notification.message_type,
-                    'title': notification.title,
-                    'body': notification.body,
-                    'broadcast': 'true',
-                },
-            }
-
-            server_key = getattr(settings, 'FCM_SERVER_KEY', '')
-            if server_key:
-                headers = {'Authorization': f'key={server_key}', 'Content-Type': 'application/json'}
+            service_account_json = getattr(settings, 'FCM_SERVICE_ACCOUNT_JSON', '')
+            if service_account_json:
                 try:
-                    push_response = requests.post(
-                        'https://fcm.googleapis.com/fcm/send',
-                        data=json.dumps(payload),
-                        headers=headers,
-                        timeout=20,
-                    )
-                    push_status = 'sent' if push_response.status_code < 300 else f'failed_{push_response.status_code}'
-                except requests.RequestException:
-                    push_status = 'request_failed'
+                    service_account = json.loads(service_account_json)
+                    sent, failed = _send_fcm_v1(service_account, tokens, notification)
+                    push_status = f'sent={sent},failed={failed}'
+                except (KeyError, ValueError, json.JSONDecodeError, requests.RequestException) as exc:
+                    push_status = f'v1_failed:{type(exc).__name__}'
             else:
-                push_status = 'no_server_key'
+                server_key = getattr(settings, 'FCM_SERVER_KEY', '')
+                if server_key:
+                    payload = {
+                        'registration_ids': tokens,
+                        'notification': {
+                            'title': notification.title,
+                            'body': notification.body,
+                        },
+                        'data': {
+                            'type': notification.message_type,
+                            'title': notification.title,
+                            'body': notification.body,
+                            'broadcast': 'true',
+                        },
+                    }
+                    headers = {'Authorization': f'key={server_key}', 'Content-Type': 'application/json'}
+                    try:
+                        push_response = requests.post(
+                            'https://fcm.googleapis.com/fcm/send',
+                            data=json.dumps(payload),
+                            headers=headers,
+                            timeout=20,
+                        )
+                        push_status = 'sent' if push_response.status_code < 300 else f'failed_{push_response.status_code}'
+                    except requests.RequestException:
+                        push_status = 'request_failed'
+                else:
+                    push_status = 'no_fcm_credentials'
         else:
             push_status = 'no_device_tokens'
 
@@ -133,3 +144,72 @@ class BroadcastNotificationView(APIView):
             },
             status=status.HTTP_201_CREATED,
         )
+
+
+def _get_fcm_access_token(service_account):
+    now = int(time.time())
+    claims = {
+        'iss': service_account['client_email'],
+        'scope': 'https://www.googleapis.com/auth/firebase.messaging',
+        'aud': 'https://oauth2.googleapis.com/token',
+        'iat': now,
+        'exp': now + 3600,
+    }
+    assertion = jwt.encode(
+        claims,
+        service_account['private_key'],
+        algorithm='RS256',
+    )
+    response = requests.post(
+        'https://oauth2.googleapis.com/token',
+        data={
+            'grant_type': 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+            'assertion': assertion,
+        },
+        timeout=20,
+    )
+    response.raise_for_status()
+    return response.json()['access_token']
+
+
+def _send_fcm_v1(service_account, tokens, notification):
+    access_token = _get_fcm_access_token(service_account)
+    project_id = service_account['project_id']
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Content-Type': 'application/json',
+    }
+    sent = 0
+    failed = 0
+
+    for token in tokens:
+        payload = {
+            'message': {
+                'token': token,
+                'notification': {
+                    'title': notification.title,
+                    'body': notification.body,
+                },
+                'data': {
+                    'type': notification.message_type,
+                    'title': notification.title,
+                    'body': notification.body,
+                    'broadcast': 'true',
+                },
+                'android': {
+                    'priority': 'high',
+                },
+            }
+        }
+        response = requests.post(
+            f'https://fcm.googleapis.com/v1/projects/{project_id}/messages:send',
+            data=json.dumps(payload),
+            headers=headers,
+            timeout=20,
+        )
+        if response.status_code < 300:
+            sent += 1
+        else:
+            failed += 1
+
+    return sent, failed
