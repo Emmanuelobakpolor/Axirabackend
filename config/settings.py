@@ -285,3 +285,5 @@ LOGGING = {
         },
     },
 }
+
+FCM_SERVER_KEY = os.environ.get("FCM_SERVER_KEY", "")

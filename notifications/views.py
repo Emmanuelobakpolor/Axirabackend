@@ -87,6 +87,7 @@ class BroadcastNotificationView(APIView):
             ).values_list('token', flat=True).distinct()
         )
 
+        push_status = 'not_configured'
         if tokens:
             import requests
 
@@ -107,18 +108,28 @@ class BroadcastNotificationView(APIView):
             server_key = getattr(settings, 'FCM_SERVER_KEY', '')
             if server_key:
                 headers = {'Authorization': f'key={server_key}', 'Content-Type': 'application/json'}
-                requests.post(
-                    'https://fcm.googleapis.com/fcm/send',
-                    data=json.dumps(payload),
-                    headers=headers,
-                    timeout=20,
-                )
+                try:
+                    push_response = requests.post(
+                        'https://fcm.googleapis.com/fcm/send',
+                        data=json.dumps(payload),
+                        headers=headers,
+                        timeout=20,
+                    )
+                    push_status = 'sent' if push_response.status_code < 300 else f'failed_{push_response.status_code}'
+                except requests.RequestException:
+                    push_status = 'request_failed'
+            else:
+                push_status = 'no_server_key'
+        else:
+            push_status = 'no_device_tokens'
 
         return Response(
             {
                 'message': 'Broadcast sent.',
                 'target_users': len(target_user_ids),
                 'notification_id': str(notification.id),
+                'device_tokens': len(tokens),
+                'push_status': push_status,
             },
             status=status.HTTP_201_CREATED,
         )
