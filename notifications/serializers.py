@@ -15,7 +15,7 @@ class UserDeviceTokenSerializer(serializers.ModelSerializer):
 
 class BroadcastNotificationSerializer(serializers.ModelSerializer):
     user_ids = serializers.ListField(
-        child=serializers.UUIDField(),
+        child=serializers.IntegerField(min_value=1),
         required=False,
         allow_empty=True,
         default=list,
@@ -29,10 +29,17 @@ class BroadcastNotificationSerializer(serializers.ModelSerializer):
         target_scope = attrs.get('target_scope')
         user_ids = attrs.get('user_ids', [])
 
-        if target_scope == AppNotification.TargetScope.SPECIFIC_USERS and not user_ids:
-            raise serializers.ValidationError(
-                {'user_ids': 'Select at least one user when sending to specific users.'}
-            )
+        if target_scope == AppNotification.TargetScope.SPECIFIC_USERS:
+            if not user_ids:
+                raise serializers.ValidationError(
+                    {'user_ids': 'Select at least one user when sending to specific users.'}
+                )
+
+            existing_ids = set(User.objects.filter(id__in=user_ids).values_list('id', flat=True))
+            if existing_ids != set(user_ids):
+                raise serializers.ValidationError(
+                    {'user_ids': 'One or more selected users do not exist.'}
+                )
 
         if target_scope == AppNotification.TargetScope.ALL_USERS:
             attrs['user_ids'] = []
